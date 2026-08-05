@@ -1,0 +1,1398 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>SideKit</title>
+<link rel="icon" href="/favicon.ico">
+<style>
+  :root {
+    --bg: #f0f0f2;
+    --sidebar: #e8e8ec;
+    --card: #ffffff;
+    --text: #1d1d1f;
+    --muted: #86868b;
+    --accent: #0071e3;
+    --accent-dark: #0058b0;
+    --ok: #1e9e4a;
+    --err: #d63031;
+    --border: #e2e2e6;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", Helvetica, Arial, sans-serif;
+    color: var(--text);
+    background: var(--bg);
+  }
+  #app { display: flex; height: 100vh; }
+
+  /* ---- sidebar ---- */
+  #sidebar {
+    width: 250px; flex-shrink: 0;
+    background: var(--sidebar);
+    border-right: 1px solid var(--border);
+    padding: 16px 12px;
+    display: flex; flex-direction: column;
+    overflow-y: auto;
+  }
+  #sidebar h1 { font-size: 15px; font-weight: 700; margin: 4px 8px 14px; }
+  .side-label { font-size: 11px; text-transform: uppercase; color: var(--muted); margin: 14px 8px 6px; letter-spacing: .04em; }
+  .device-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 13px;
+  }
+  .device-item:hover { background: rgba(0,0,0,.05); }
+  .device-item.active { background: var(--accent); color: white; }
+  .device-icon { font-size: 16px; }
+  .device-meta { font-size: 11px; color: var(--muted); }
+  .device-item.active .device-meta { color: rgba(255,255,255,.8); }
+  .sidebar-btn {
+    font-size: 12px; color: var(--accent); background: none; border: none; cursor: pointer;
+    padding: 6px 8px; text-align: left;
+  }
+  .empty-hint { font-size: 12px; color: var(--muted); padding: 8px; line-height: 1.5; }
+
+  .apple-box {
+    margin-top: auto;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-size: 12px;
+  }
+  .apple-box .title { font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+  .apple-box input {
+    width: 100%; padding: 6px 8px; margin-top: 5px; border: 1px solid var(--border);
+    border-radius: 6px; font-size: 12px; background: #fbfbfd;
+  }
+  .apple-box button {
+    margin-top: 8px; width: 100%; background: var(--accent); color: white; border: none;
+    padding: 6px; border-radius: 6px; font-size: 12px; cursor: pointer;
+  }
+  .apple-box button:hover { background: var(--accent-dark); }
+  .apple-box .account-email { font-weight: 500; word-break: break-all; padding: 2px 0 2px; }
+  .apple-box .secondary-btn { background: #e5e5ea; color: var(--text); }
+  .apple-box .secondary-btn:hover { background: #d9d9de; }
+  .apple-box .link-btn {
+    background: none; color: var(--accent); padding: 4px 0 0; margin-top: 4px; font-size: 11px;
+  }
+  .apple-box .link-btn:hover { background: none; text-decoration: underline; }
+  .twofa-hint { font-size: 11px; color: var(--muted); line-height: 1.4; margin-bottom: 2px; }
+  /* The code is the only thing being typed at that moment - make it big and
+     unambiguous rather than another cramped little field. */
+  #loginCode {
+    text-align: center; letter-spacing: 4px; font-size: 16px; font-weight: 600;
+    padding: 8px; font-variant-numeric: tabular-nums;
+  }
+  .apple-status { display:flex; align-items:center; gap:6px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #c7c7cc; flex-shrink: 0; }
+  .dot.ok { background: var(--ok); }
+  .dot.err { background: var(--err); }
+
+  /* ---- main ---- */
+  #main { flex: 1; overflow-y: auto; padding: 24px 32px; }
+  .main-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+  .main-header h2 { font-size: 19px; font-weight: 600; margin: 0; }
+  .main-header .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .progress-banner {
+    display: none;
+    align-items: center; gap: 12px;
+    background: linear-gradient(135deg, #0071e3, #0058b0);
+    color: white; border-radius: 12px; padding: 16px 20px;
+    margin-bottom: 18px; font-size: 15px; font-weight: 600;
+    box-shadow: 0 4px 14px rgba(0,113,227,.3);
+  }
+  .progress-banner .big-spinner {
+    width: 22px; height: 22px; border: 3px solid rgba(255,255,255,.35);
+    border-top-color: white; border-radius: 50%; animation: spin .8s linear infinite;
+    flex-shrink: 0;
+  }
+  .progress-banner .sub2 { font-size: 12px; font-weight: 400; opacity: .85; margin-top: 2px; word-break: break-all; }
+  .progress-banner .bar-track {
+    background: rgba(255,255,255,.28); border-radius: 6px; height: 6px;
+    overflow: hidden; margin-top: 10px;
+  }
+  .progress-banner .bar-fill {
+    background: white; height: 100%; width: 0%;
+    transition: width .3s ease; border-radius: 6px;
+  }
+  .progress-banner .percent-num { font-size: 20px; font-weight: 700; flex-shrink: 0; }
+  .banner-actions { display: flex; gap: 6px; flex-shrink: 0; }
+  .banner-actions button {
+    width: 30px; height: 30px; padding: 0; line-height: 1;
+    background: rgba(255,255,255,.2); color: white; border: none;
+    border-radius: 8px; font-size: 13px; cursor: pointer;
+  }
+  .banner-actions button:hover { background: rgba(255,255,255,.34); }
+  .actions button {
+    background: var(--accent); color: white; border: none; padding: 8px 14px;
+    border-radius: 8px; font-size: 13px; cursor: pointer; margin-left: 8px; font-weight: 500;
+  }
+  .actions button.secondary { background: #e5e5ea; color: var(--text); }
+  .actions button:hover { filter: brightness(0.95); }
+  .actions button:disabled { background: #d5d5da; color: #9a9a9e; cursor: default; }
+
+  .toolbar { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; font-size: 12px; color: var(--muted); }
+  .toolbar label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
+  .toolbar .tab-btn {
+    background: #e5e5ea; color: var(--text); border: none; padding: 5px 11px;
+    border-radius: 7px; font-size: 12px; cursor: pointer;
+  }
+  .toolbar .tab-btn.active { background: var(--accent); color: white; }
+  .toolbar .tab-btn:hover { filter: brightness(0.95); }
+  /* Takes the leftover width so the counter stays pinned to the right. */
+  .toolbar .list-search {
+    flex: 1; min-width: 140px; max-width: 340px;
+    padding: 5px 10px; border: 1px solid var(--border); border-radius: 7px;
+    font-size: 12px; background: var(--card);
+  }
+  .toolbar .list-search:focus { outline: none; border-color: var(--accent); }
+  /* The manual-id field only appears for apps whose App Store id couldn't be
+     worked out automatically, so it sits inside the row rather than taking
+     up space in every one of them. */
+  .app-row input.item-id {
+    width: 120px; padding: 5px 8px; border: 1px solid var(--border);
+    border-radius: 7px; font-size: 12px; flex-shrink: 0;
+  }
+
+  .app-list { background: var(--card); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .app-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 13px;
+  }
+  .app-row:last-child { border-bottom: none; }
+  .app-avatar {
+    width: 34px; height: 34px; border-radius: 8px; flex-shrink: 0;
+    background: linear-gradient(135deg, #6ab0ff, #0071e3);
+    color: white; display: flex; align-items: center; justify-content: center;
+    font-weight: 600; font-size: 14px;
+  }
+  /* Once the real icon arrives it replaces the initials entirely - the
+     gradient background would otherwise show through icons with rounded
+     or transparent corners. */
+  .app-avatar.has-icon { background: none; }
+  .app-avatar img { width: 100%; height: 100%; border-radius: inherit; display: block; }
+  .app-info { flex: 1; min-width: 0; }
+  .app-name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .app-meta { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .app-row button {
+    background: #eef4ff; color: var(--accent); border: none; padding: 6px 12px;
+    border-radius: 7px; font-size: 12px; cursor: pointer; flex-shrink: 0;
+  }
+  .app-row button:hover { background: #dcebff; }
+  .app-row button:disabled { background: #eee; color: #aaa; cursor: default; }
+
+  .msg { font-size: 13px; margin-top: 14px; padding: 9px 12px; border-radius: 8px; display: none; }
+  .msg.ok { background: #e6f7eb; color: var(--ok); display: block; }
+  .msg.err { background: #fdecec; color: var(--err); display: block; }
+  .msg.info { background: #eef4ff; color: var(--accent); display: block; }
+
+  .search-card {
+    margin-top: 22px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px 18px;
+  }
+  .search-card summary { font-size: 13px; font-weight: 600; cursor: pointer; color: var(--muted); }
+  .search-row { display: flex; gap: 8px; margin-top: 10px; }
+  .search-row input {
+    flex: 1; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px;
+  }
+  .search-row button { background: var(--accent); color: white; border: none; padding: 8px 14px; border-radius: 8px; font-size: 13px; cursor: pointer; }
+
+  .setup-banner {
+    display: none;
+    background: #fff6e6; border: 1px solid #ffe1a8; color: #8a5a00;
+    border-radius: 10px; padding: 10px 14px; font-size: 12px; margin-bottom: 16px;
+    align-items: center; justify-content: space-between;
+  }
+  .setup-banner button { background: #8a5a00; color: white; border: none; padding: 6px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; }
+  .setup-log {
+    font-family: ui-monospace, monospace; font-size: 11px; background: #f5f5f7; border-radius: 8px;
+    padding: 8px 10px; margin-top: 10px; max-height: 120px; overflow-y: auto; white-space: pre-wrap; display: none;
+  }
+  .spinner {
+    display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(255,255,255,.4);
+    border-top-color: white; border-radius: 50%; animation: spin .7s linear infinite; margin-right: 6px; vertical-align: -1px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes pulseHighlight {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(214,48,49,0); }
+    50% { box-shadow: 0 0 0 6px rgba(214,48,49,.25); }
+  }
+  .apple-box.attention { animation: pulseHighlight 1s ease-in-out 2; border: 1px solid var(--err); }
+  .empty-state { text-align: center; padding: 60px 20px; color: var(--muted); font-size: 13px; }
+  .link-action {
+    background: none; border: none; padding: 6px 0 0; cursor: pointer;
+    color: #0a6cff; font: inherit; text-decoration: underline;
+  }
+  .pwd-wrap { position: relative; }
+  .pwd-wrap { display: block; }
+  .pwd-wrap input { width: 100%; padding-right: 76px; box-sizing: border-box; }
+  .apple-box .pwd-eye {
+    position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+    width: auto; min-width: 0; margin: 0; padding: 2px 0;
+    background: none; border: none; box-shadow: none;
+    font-size: 11px; line-height: 1; white-space: nowrap;
+    color: #0a6cff; opacity: .85; cursor: pointer;
+  }
+  .apple-box .pwd-eye:hover { opacity: 1; background: none; }
+  .pwd-eye:hover { opacity: .9; }
+  .ipa-queue { margin: 6px 0 2px; display: none; }
+  .ipa-queue.on { display: block; }
+  .ipa-row {
+    display: flex; align-items: center; gap: 6px; font-size: 11.5px;
+    padding: 3px 4px; color: #444;
+  }
+  .ipa-row .nm {
+    flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .ipa-row.done { opacity: .55; }
+  .ipa-row.fail { color: #c0392b; }
+  .ipa-drop { border: none; background: none; cursor: pointer; opacity: .5; }
+  .job-row .job-mark { width: 26px; text-align: center; font-size: 15px; }
+  .job-row.done { opacity: .6; }
+  .job-row.fail .app-meta { color: #c0392b; }
+  .update-note {
+    display: none; margin: 8px 2px 0; padding: 8px 10px; border-radius: 8px;
+    background: #eaf3ff; color: #14508c; font-size: 11.5px; line-height: 1.35;
+  }
+  .update-note.on { display: block; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="sidebar">
+    <h1>📱 SideKit</h1>
+
+    <div class="side-label">Устройства</div>
+    <div id="deviceItems"><div class="empty-hint">Подключи iPhone по USB...</div></div>
+    <button class="sidebar-btn" onclick="loadDevices()">↻ Обновить устройства</button>
+    <button class="sidebar-btn" onclick="sendReport(this)">🧾 Сообщить об ошибке</button>
+    <div id="updateNote" class="update-note"></div>
+
+    <div class="apple-box" id="appleBox">
+      <div class="title"><span class="dot" id="appleDot"></span> Apple ID</div>
+      <!-- Step 1: credentials. -->
+      <div id="appleCredentials">
+        <input type="email" id="loginEmail" placeholder="Apple ID (email)">
+        <div class="pwd-wrap">
+          <input type="password" id="loginPassword" placeholder="Пароль"
+                 onkeydown="if(event.key==='Enter') doLogin()">
+          <button class="pwd-eye" id="pwdEye" onclick="togglePassword()"
+                  title="Показать пароль">показать</button>
+        </div>
+        <button id="loginBtn" onclick="doLogin()">Войти</button>
+        <!-- Safety net: if the code request is ever not recognised, the field
+             is still one click away instead of unreachable. -->
+        <button class="link-btn" onclick="setAppleState('2fa')">Apple прислала код — ввести его</button>
+      </div>
+
+      <!-- Step 2: only shown once Apple actually asks for a code. -->
+      <div id="appleTwoFactor" style="display:none">
+        <div class="twofa-hint">
+          Apple отправила 6-значный код на твои устройства. Введи его — вход продолжится сам.
+          <br><br><span style="opacity:.7">Код не пришёл? Значит Apple ID или пароль
+          неверные — Apple отвечает на это так же, как на запрос кода.</span>
+        </div>
+        <input type="text" id="loginCode" placeholder="000000" inputmode="numeric"
+               maxlength="6" autocomplete="one-time-code" oninput="onCodeInput()">
+        <button class="link-btn" onclick="cancelTwoFactor()">Ввести другой Apple ID</button>
+      </div>
+
+      <!-- Step 3: signed in - just who, and a way out. -->
+      <div id="appleAccount" style="display:none">
+        <div class="account-email" id="accountEmail"></div>
+        <button class="secondary-btn" onclick="doLogout()">Выйти</button>
+      </div>
+
+      <div class="msg" id="loginMsg" style="margin-top:6px"></div>
+    </div>
+  </div>
+
+  <div id="main">
+    <div class="setup-banner" id="setupBanner">
+      <span>Нужно доустановить пару компонентов (один раз).</span>
+      <button onclick="runSetup()">Настроить</button>
+    </div>
+    <div class="setup-log" id="setupLog"></div>
+
+    <div class="progress-banner" id="progressBanner">
+      <div class="big-spinner" id="progressSpinner"></div>
+      <div style="flex:1; min-width:0">
+        <div id="progressText">Идёт операция...</div>
+        <div class="sub2" id="progressSub"></div>
+        <div class="bar-track" id="progressBarTrack" style="display:none">
+          <div class="bar-fill" id="progressBarFill"></div>
+        </div>
+      </div>
+      <div class="percent-num" id="progressPercent" style="display:none"></div>
+      <div class="banner-actions" id="progressActions" style="display:none">
+        <button id="pauseBtn" onclick="togglePause()" title="Пауза">⏸</button>
+        <button id="cancelBtn" onclick="cancelTransfer()" title="Отменить">✕</button>
+      </div>
+    </div>
+
+    <div class="main-header">
+      <div>
+        <h2 id="deviceTitle">Выбери устройство слева</h2>
+        <div class="sub" id="deviceSub">Подключи iPhone по USB и подтверди «Доверять этому компьютеру»</div>
+      </div>
+      <div class="actions">
+        <button class="secondary" onclick="refreshCurrentTab()">Обновить список</button>
+        <button onclick="installFlow()">Установить приложение…</button>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <button class="secondary tab-btn" id="tabInstalled" onclick="showTab('installed')">Установленные</button>
+      <button class="secondary tab-btn" id="tabVanished" onclick="showTab('vanished')">Удалённые приложения</button>
+      <button class="secondary tab-btn" id="tabQueue" onclick="showTab('queue')">Список</button>
+      <input type="search" id="appSearch" class="list-search" placeholder="Поиск по названию или ID"
+             oninput="filterList()" autocomplete="off">
+      <span id="memoryStats"></span>
+    </div>
+
+    <div class="app-list" id="appList">
+      <div class="empty-state">Выбери устройство слева, чтобы увидеть его приложения</div>
+    </div>
+
+    <div class="msg" id="mainMsg"></div>
+
+    <details class="search-card">
+      <summary>Найти приложение в App Store (если его ещё нет на телефоне)</summary>
+      <div class="search-row">
+        <input type="text" id="searchTerm" placeholder="Название приложения">
+        <button onclick="doSearch()">Искать</button>
+      </div>
+      <div id="searchResults"></div>
+    </details>
+  </div>
+</div>
+
+<script>
+window.addEventListener('error', function(e) {
+  var el = document.getElementById('jsErrorBanner');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'jsErrorBanner';
+    el.style.cssText = 'position:fixed;bottom:12px;right:12px;max-width:420px;background:#d63031;color:white;padding:12px 16px;border-radius:10px;font-size:12px;font-family:ui-monospace,monospace;z-index:99999;box-shadow:0 6px 18px rgba(0,0,0,.35);white-space:pre-wrap;';
+    document.body.appendChild(el);
+  }
+  el.textContent = 'Ошибка в интерфейсе (пришли этот текст): ' + e.message + '  [' + (e.filename || '') + ':' + e.lineno + ']';
+});
+let devices = [];
+let activeUdid = null;
+let loggedIn = false;
+
+async function api(method, path, body) {
+  const opts = { method };
+  if (body !== undefined) {
+    opts.headers = { "Content-Type": "application/json" };
+    opts.body = JSON.stringify(body);
+  }
+  const res = await fetch(path, opts);
+  return res.json();
+}
+
+function showMsg(el, text, kind) {
+  el.className = "msg " + kind;
+  el.textContent = text;
+  // The message box can end up far below a long app list - without this,
+  // errors like "log in first" happen invisibly off-screen and look like
+  // the button that triggered them did nothing at all.
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+let deviceOpBusy = false;
+function showProgress(text, sub, withBar) {
+  deviceOpBusy = true;
+  const banner = document.getElementById("progressBanner");
+  document.getElementById("progressText").textContent = text;
+  document.getElementById("progressSub").textContent = sub || "";
+  document.getElementById("progressBarTrack").style.display = withBar ? "block" : "none";
+  document.getElementById("progressPercent").style.display = withBar ? "block" : "none";
+  document.getElementById("progressSpinner").style.display = withBar ? "none" : "block";
+  if (withBar) updateProgressPercent(0);
+  banner.style.display = "flex";
+}
+
+function updateProgressPercent(percent, sub) {
+  document.getElementById("progressBarFill").style.width = percent + "%";
+  document.getElementById("progressPercent").textContent = percent + "%";
+  if (sub !== undefined) document.getElementById("progressSub").textContent = sub;
+}
+
+function hideProgress() {
+  deviceOpBusy = false;
+  document.getElementById("progressBanner").style.display = "none";
+  document.getElementById("progressActions").style.display = "none";
+}
+
+// Pause/cancel are only meaningful while something is actually moving, so
+// the buttons appear with the transfer and leave with it.
+function showBannerActions(canPause) {
+  document.getElementById("progressActions").style.display = "flex";
+  document.getElementById("pauseBtn").style.display = canPause ? "" : "none";
+}
+
+let transferPaused = false;
+
+async function togglePause() {
+  const btn = document.getElementById("pauseBtn");
+  const result = await api("POST", "/api/download-control",
+    { action: transferPaused ? "resume" : "pause" });
+  if (!result.ok) return;
+  transferPaused = !transferPaused;
+  btn.textContent = transferPaused ? "▶" : "⏸";
+  btn.title = transferPaused ? "Продолжить" : "Пауза";
+}
+
+async function cancelTransfer() {
+  await api("POST", "/api/download-control", { action: "cancel" });
+  transferPaused = false;
+  document.getElementById("pauseBtn").textContent = "⏸";
+}
+
+// ---- setup ----
+async function refreshStatus() {
+  const s = await api("GET", "/api/status");
+  const banner = document.getElementById("setupBanner");
+  banner.style.display = (s.pymobiledevice3 && s.ipatool) ? "none" : "flex";
+  return s;
+}
+
+function appendLog(el, line) {
+  el.textContent += (el.textContent ? "\n" : "") + line;
+  el.scrollTop = el.scrollHeight;
+}
+
+async function runSetup() {
+  const log = document.getElementById("setupLog");
+  const banner = document.getElementById("setupBanner");
+  const btn = banner.querySelector("button");
+  btn.disabled = true;
+  log.style.display = "block";
+  log.textContent = "";
+
+  const status = await api("GET", "/api/status");
+  const steps = [
+    { key: "pymobiledevice3", url: "/api/setup/pymobiledevice3", note: "обычно 1-3 минуты в первый раз, тянет зависимости" },
+    { key: "ipatool", url: "/api/setup/ipatool", note: "скачивание бинарника, ~10 секунд" },
+    { key: "zsign", url: "/api/setup/zsign", note: "необязательно, можно пропустить при ошибке" },
+  ];
+
+  for (const step of steps) {
+    if (status[step.key]) {
+      appendLog(log, `${step.key}: уже установлен, пропускаю.`);
+      continue;
+    }
+    appendLog(log, `Устанавливаю ${step.key} (${step.note})...`);
+    const t0 = Date.now();
+    try {
+      const result = await api("POST", step.url);
+      const secs = ((Date.now() - t0) / 1000).toFixed(1);
+      (result.log || []).forEach(line => appendLog(log, "  " + line));
+      appendLog(log, `${step.key}: ${result.ok ? "готово" : "не получилось"} (${secs} c)`);
+    } catch (e) {
+      appendLog(log, `${step.key}: ошибка сети - ${e}`);
+    }
+  }
+
+  const finalStatus = await api("GET", "/api/status");
+  if (finalStatus.pymobiledevice3 && finalStatus.ipatool) {
+    banner.style.display = "none";
+    appendLog(log, "Всё готово, можно пользоваться.");
+  } else {
+    appendLog(log, "Часть компонентов не встала — можно нажать «Настроить» ещё раз, повторная попытка часто помогает.");
+  }
+  btn.disabled = false;
+}
+
+// ---- Apple ID ----
+// The Apple ID box has three faces: ask for credentials, ask for the code,
+// or simply state who is signed in. Only one is ever on screen, which is
+// what keeps it small.
+function setAppleState(state, email) {
+  document.getElementById("appleCredentials").style.display = state === "credentials" ? "" : "none";
+  document.getElementById("appleTwoFactor").style.display = state === "2fa" ? "" : "none";
+  document.getElementById("appleAccount").style.display = state === "account" ? "" : "none";
+  document.getElementById("appleDot").classList.toggle("ok", state === "account");
+  if (state === "account") document.getElementById("accountEmail").textContent = email || "";
+  if (state === "2fa") setTimeout(() => document.getElementById("loginCode").focus(), 50);
+}
+
+// Six digits is the whole code - there is nothing to decide afterwards, so
+// submit it instead of making the user reach for the button again.
+function onCodeInput() {
+  const field = document.getElementById("loginCode");
+  field.value = field.value.replace(/\D/g, "").slice(0, 6);
+  if (field.value.length === 6) doLogin();
+}
+
+function cancelTwoFactor() {
+  document.getElementById("loginCode").value = "";
+  document.getElementById("loginMsg").style.display = "none";
+  setAppleState("credentials");
+}
+
+// Отчёт о неполадке: программа сама собирает всё нужное в один файл на
+// Рабочем столе, его остаётся переслать.
+async function sendReport(btn) {
+  const msg = document.getElementById("mainMsg");
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Собираю…";
+  try {
+    const res = await api("POST", "/api/report", {});
+    if (res.ok) {
+      showMsg(msg, "Отчёт сохранён на Рабочий стол: " + res.path.split(/[\\/]/).pop()
+        + ". Перешли этот файл Динару.", "ok");
+    } else {
+      showMsg(msg, res.error || "Не получилось собрать отчёт", "err");
+    }
+  } catch (e) {
+    showMsg(msg, "Ошибка: " + e, "err");
+  }
+  btn.disabled = false;
+  btn.textContent = original;
+}
+
+// Проверка обновлений идёт в движке сама; здесь только показываем итог.
+async function checkUpdateNote() {
+  try {
+    const st = await api("GET", "/api/status");
+    const box = document.getElementById("updateNote");
+    if (st.update && st.update.available) {
+      box.classList.add("on");
+      box.textContent = "Есть обновление " + st.update.version
+        + (st.update.notes ? " — " + st.update.notes : "")
+        + ". Оно уже скачано: закрой и открой SideKit.";
+    } else {
+      box.classList.remove("on");
+    }
+  } catch (e) { /* без интернета - молчим */ }
+}
+
+function togglePassword() {
+  const field = document.getElementById("loginPassword");
+  const eye = document.getElementById("pwdEye");
+  const hidden = field.type === "password";
+  field.type = hidden ? "text" : "password";
+  eye.textContent = hidden ? "скрыть" : "показать";
+  eye.title = hidden ? "Скрыть пароль" : "Показать пароль";
+  field.focus();
+}
+
+// Единая очередь всех дел с телефоном: выгрузка .ipa, установка файлов и
+// возвращение удалённых приложений. Она одна, потому что и телефон, и
+// App Store принимают одно дело за раз - параллельно быстрее не станет,
+// станет только менее надёжно. Всё видно на вкладке «Список».
+let jobs = [];
+let jobsRunning = false;
+let jobSeq = 0;
+const pause = ms => new Promise(r => setTimeout(r, ms));
+
+const JOB_TITLES = { export: "Выгрузка", install: "Установка", restore: "Возвращение" };
+const JOB_MARKS = { wait: "⏳", work: "⬇", done: "✓", fail: "✗" };
+
+function addJob(job) {
+  job.id = ++jobSeq;
+  job.state = "wait";
+  jobs.push(job);
+  updateQueueBadge();
+  if (currentTab === "queue") renderJobs();
+  runJobs();
+  return job;
+}
+
+function updateQueueBadge() {
+  const waiting = jobs.filter(j => j.state === "wait" || j.state === "work").length;
+  document.getElementById("tabQueue").textContent = waiting ? `Список · ${waiting}` : "Список";
+}
+
+function renderJobs() {
+  if (currentTab !== "queue") return;
+  const list = document.getElementById("appList");
+  if (!jobs.length) {
+    list.innerHTML = "<div class='empty-state'>Список пуст. Выгружай приложения, ставь .ipa "
+      + "или возвращай удалённые — всё, что делается, показывается здесь.</div>";
+    return;
+  }
+  list.innerHTML = "";
+  jobs.forEach((job, index) => {
+    const row = document.createElement("div");
+    row.className = "app-row job-row " + job.state;
+    const mark = document.createElement("div");
+    mark.className = "job-mark";
+    mark.textContent = JOB_MARKS[job.state];
+    row.appendChild(mark);
+    const info = document.createElement("div");
+    info.className = "app-info";
+    const nameEl = document.createElement("div");
+    nameEl.className = "app-name";
+    nameEl.textContent = job.name;
+    const metaEl = document.createElement("div");
+    metaEl.className = "app-meta";
+    const place = jobs.filter((j, i) => i < index && j.state === "wait").length + 1;
+    metaEl.textContent = JOB_TITLES[job.kind] + " · " + (
+      job.state === "wait" ? "в очереди, " + place
+      : job.state === "work" ? (job.detail || "идёт сейчас")
+      : job.state === "fail" ? (job.error || "не получилось")
+      : (job.result || "готово"));
+    info.appendChild(nameEl);
+    info.appendChild(metaEl);
+    row.appendChild(info);
+    if (job.state === "done" && job.path) {
+      const reveal = document.createElement("button");
+      reveal.className = "secondary";
+      reveal.textContent = "Показать файл";
+      reveal.onclick = () => api("POST", "/api/reveal", { path: job.path });
+      row.appendChild(reveal);
+    }
+    if (job.state !== "work") {
+      const drop = document.createElement("button");
+      drop.className = "secondary";
+      drop.textContent = "✕";
+      drop.title = job.state === "wait" ? "Убрать из очереди" : "Убрать из списка";
+      drop.onclick = () => { jobs = jobs.filter(j => j.id !== job.id); updateQueueBadge(); renderJobs(); };
+      row.appendChild(drop);
+    }
+    list.appendChild(row);
+  });
+}
+
+async function runJobs() {
+  if (jobsRunning) return;
+  jobsRunning = true;
+  try {
+    while (true) {
+      const job = jobs.find(j => j.state === "wait");
+      if (!job) break;
+      job.state = "work";
+      updateQueueBadge();
+      renderJobs();
+      let res;
+      if (job.kind === "export") res = await runExportJob(job);
+      else if (job.kind === "install") res = await runInstallJob(job);
+      else res = await runRestoreJob(job);
+      job.state = res.ok ? "done" : "fail";
+      job.error = res.error;
+      job.path = res.path;
+      job.result = res.result;
+      updateQueueBadge();
+      renderJobs();
+      if (res.cancelled) {
+        jobs.forEach(j => { if (j.state === "wait") { j.state = "fail"; j.error = "отменено"; } });
+        updateQueueBadge();
+        renderJobs();
+        break;
+      }
+    }
+  } finally {
+    jobsRunning = false;
+    hideProgress();
+  }
+}
+
+async function runExportJob(job) {
+  showProgress(`Выгружаю ${job.name}...`, "Скачиваю из App Store", true);
+  transferPaused = false;
+  showBannerActions(true);
+  try {
+    const started = await api("POST", "/api/download",
+      { bundle_id: job.bundle_id, purchase: true, to_desktop: true, name: job.name });
+    if (!started.ok) return { ok: false, error: started.error || "не началось" };
+    while (true) {
+      await pause(500);
+      const p = await api("GET", "/api/download-progress");
+      const size = (p.downloaded && p.total) ? ` · ${p.downloaded} / ${p.total}` : "";
+      job.detail = (p.paused ? "пауза" : "скачиваю") + size;
+      updateProgressPercent(p.percent || 0, (p.paused ? "Пауза · " : "") + `На Рабочий стол${size}`);
+      renderJobs();
+      if (p.status === "cancelled") return { ok: false, cancelled: true, error: "отменено" };
+      if (p.status === "error") return { ok: false, error: p.error || "ошибка выгрузки" };
+      if (p.status === "done") return { ok: true, path: p.path, result: "на Рабочем столе" };
+    }
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+async function runInstallJob(job) {
+  showProgress(`Ставлю ${job.name}...`, "Передаю на iPhone", true);
+  showBannerActions(false);
+  try {
+    const started = await api("POST", "/api/install", { ipa_path: job.path_src, udid: activeUdid });
+    if (!started.ok) return { ok: false, error: started.error || "не началось" };
+    while (true) {
+      await pause(700);
+      const p = await api("GET", "/api/install-progress");
+      updateProgressPercent(p.percent || 0);
+      job.detail = "ставлю на iPhone";
+      renderJobs();
+      if (p.status === "cancelled") return { ok: false, cancelled: true, error: "отменено" };
+      if (p.status === "error") return { ok: false, error: p.error || "ошибка установки" };
+      if (p.status === "done") { loadApps(); return { ok: true, result: "установлено" }; }
+    }
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+async function doLogin(force = false) {
+  const btn = document.getElementById("loginBtn");
+  const msg = document.getElementById("loginMsg");
+  const codeField = document.getElementById("loginCode");
+  const email = document.getElementById("loginEmail").value.trim();
+  const password = document.getElementById("loginPassword").value;
+  const code = codeField.value.trim();
+
+  if (!email || !password) {
+    // Can happen if the code step was opened by hand after a reload - the
+    // password field is empty then, so go back and ask for it.
+    setAppleState("credentials");
+    showMsg(msg, "Впиши Apple ID и пароль.", "err");
+    return;
+  }
+
+  btn.disabled = true;
+  codeField.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Вхожу...';
+  if (code) showMsg(msg, "Проверяю код…", "info");
+
+  try {
+    const result = await api("POST", "/api/login", { email, password, auth_code: code || null, force });
+    loggedIn = !!result.ok;
+    if (loggedIn) {
+      msg.style.display = "none";
+      document.getElementById("loginPassword").value = "";
+      codeField.value = "";
+      setAppleState("account", email);
+      refreshMemoryStats();
+    } else if (result.confirm_login) {
+      // Логин не похож на тот, которым пользовались раньше. Дальше не идём:
+      // Apple на неверный пароль отвечает так же, как на запрос кода, и
+      // человек застревает на экране кода, которого ему не пришлют.
+      showMsg(msg, result.error, "err");
+      const again = document.createElement("button");
+      again.textContent = "Всё равно продолжить";
+      again.className = "link-action";
+      again.onclick = () => doLogin(true);
+      msg.appendChild(document.createElement("br"));
+      msg.appendChild(again);
+    } else if (result.need2fa) {
+      codeField.value = "";
+      setAppleState("2fa");
+      showMsg(msg, result.error || "Apple прислала код — введи его.",
+              result.wrong_code ? "err" : "info");
+    } else {
+      // Stay on whichever step the attempt came from: after a rejected code
+      // the password is still correct, so sending the user back to retype it
+      // would be pure punishment.
+      if (result.at_code_step) {
+        codeField.value = "";
+        setAppleState("2fa");
+      }
+      showMsg(msg, result.error || "Не вышло, попробуй ещё раз.", "err");
+    }
+  } catch (e) {
+    showMsg(msg, "Ошибка: " + e, "err");
+  }
+  btn.disabled = false;
+  codeField.disabled = false;
+  btn.textContent = "Войти";
+}
+
+async function doLogout() {
+  const msg = document.getElementById("loginMsg");
+  try {
+    await api("POST", "/api/logout");
+  } catch (e) { /* the local state is cleared regardless */ }
+  loggedIn = false;
+  document.getElementById("loginPassword").value = "";
+  document.getElementById("loginCode").value = "";
+  setAppleState("credentials");
+  showMsg(msg, "Вышел из аккаунта. Можно войти под другим Apple ID.", "info");
+}
+
+// ---- devices ----
+// Looking for the phone can come back empty for a moment even when it IS
+// plugged in - right after launch the engine may still be busy reading it,
+// and only one thing can talk to the device at a time. Retrying quietly
+// beats telling the user to check their cable when the cable is fine. It
+// also means a phone plugged in later simply appears on its own.
+let deviceScanTimer = null;
+
+let deviceSignature = "";
+
+async function loadDevices(attempt = 0) {
+  clearTimeout(deviceScanTimer);
+  // Пока идёт скачивание или установка, телефон занят - лезть к нему с
+  // опросом нельзя, разговаривать с ним умеет только одна программа за раз.
+  if (deviceOpBusy) {
+    deviceScanTimer = setTimeout(() => loadDevices(attempt), 4000);
+    return;
+  }
+  const result = await api("GET", "/api/devices");
+  devices = result.devices || [];
+  const box = document.getElementById("deviceItems");
+  box.innerHTML = "";
+  if (!devices.length) {
+    box.innerHTML = attempt < 6
+      ? "<div class='empty-hint'>Ищу iPhone…</div>"
+      : "<div class='empty-hint'>Ничего не найдено на уровне USB. Подключи iPhone кабелем (не зарядным-only) и разблокируй его.</div>";
+    deviceSignature = "";
+    if (activeUdid) { activeUdid = null; renderMainHeader(); showTab(currentTab); }
+    deviceScanTimer = setTimeout(() => loadDevices(attempt + 1), attempt < 6 ? 4000 : 15000);
+    return;
+  }
+  const signature = devices.map(d => d.udid + (d.needs_trust ? "!" : "")).join(",");
+  const activeGone = activeUdid && !devices.some(d => d.udid === activeUdid);
+  if (activeGone) {
+    // Устройство, с которым работали, отключили - экран не должен показывать
+    // список приложений телефона, которого уже нет.
+    activeUdid = null;
+    renderMainHeader();
+    showTab(currentTab);
+  }
+  if (signature === deviceSignature && !activeGone && box.childElementCount) {
+    deviceScanTimer = setTimeout(() => loadDevices(0), 3000);
+    if (!activeUdid && devices.length) selectDevice(devices[0].udid);
+    return;
+  }
+  deviceSignature = signature;
+  devices.forEach(d => {
+    const div = document.createElement("div");
+    div.className = "device-item" + (d.udid === activeUdid ? " active" : "");
+    if (d.needs_trust) {
+      div.innerHTML = `<span class="device-icon">⚠️</span><div><div>Нужно подтвердить доверие</div><div class="device-meta">На экране телефона нажми «Доверять»</div></div>`;
+    } else {
+      div.innerHTML = `<span class="device-icon">📱</span><div><div>${d.name}</div><div class="device-meta">iOS ${d.ios}</div></div>`;
+    }
+    div.onclick = () => selectDevice(d.udid);
+    box.appendChild(div);
+  });
+  // Опрос продолжается и когда телефон найден: выдернули кабель - строка
+  // пропадает сама, подключили другой - список меняется сам, без кнопки.
+  deviceScanTimer = setTimeout(() => loadDevices(0), 3000);
+  if (!activeUdid && devices.length) selectDevice(devices[0].udid);
+}
+
+function selectDevice(udid) {
+  if (activeUdid === udid) return;
+  activeUdid = udid;
+  document.querySelectorAll("#deviceItems .device-item").forEach((el, i) => {
+    el.classList.toggle("active", devices[i] && devices[i].udid === udid);
+  });
+  renderMainHeader();
+  showTab(currentTab);
+  refreshMemoryStats();
+}
+
+// "Обновить список" should refresh whichever list is actually on screen.
+function refreshCurrentTab() {
+  showTab(currentTab);
+}
+
+function renderMainHeader() {
+  const d = devices.find(x => x.udid === activeUdid);
+  document.getElementById("deviceTitle").textContent = d ? d.name : "Выбери устройство слева";
+  document.getElementById("deviceSub").textContent = d ? `${d.product}, iOS ${d.ios}` : "Подключи iPhone по USB и подтверди «Доверять этому компьютеру»";
+}
+
+// ---- apps ----
+function initials(name) {
+  return (name || "?").trim().slice(0, 2).toUpperCase();
+}
+
+// The app's real home-screen icon, pulled off the phone. Initials show
+// immediately and stay as the fallback: icons arrive one USB round trip at
+// a time, and apps installed outside the App Store may have none at all.
+function appAvatar(name, bundleId) {
+  const avatar = document.createElement("div");
+  avatar.className = "app-avatar";
+  avatar.textContent = initials(name);
+  if (bundleId) {
+    // Иконки телефон отдаёт не мгновенно - пока они выкачиваются, картинки
+    // ещё нет. Раньше на её месте навсегда оставались буквы: запрос не
+    // повторялся. Теперь ждём и пробуем снова, пока иконка не появится.
+    let tries = 0;
+    const load = () => {
+      const img = new Image();
+      img.alt = "";
+      img.onload = () => {
+        avatar.textContent = "";
+        avatar.classList.add("has-icon");
+        avatar.innerHTML = "";
+        avatar.appendChild(img);
+      };
+      img.onerror = () => {
+        if (++tries <= 12) setTimeout(load, 1200);
+      };
+      img.src = "/api/app-icon?bundle_id=" + encodeURIComponent(bundleId)
+              + (tries ? "&t=" + Date.now() : "");
+    };
+    load();
+  }
+  return avatar;
+}
+
+// Shows how many App Store ids SideKit is holding on to. It's the whole
+// safety net in one number, and while a phone is being read the count is
+// still growing - hence the repeat check.
+async function refreshMemoryStats() {
+  try {
+    const stats = await api("GET", "/api/memory-stats");
+    const el = document.getElementById("memoryStats");
+    el.textContent = `в памяти ID: ${stats.count}` + (stats.collecting ? " (пополняю…)" : "");
+    if (stats.collecting) setTimeout(refreshMemoryStats, 4000);
+  } catch (e) { /* not important enough to surface */ }
+}
+
+// ---- vanished apps ----
+// Apps iOS removed by itself. Their home-screen icon is still on the phone,
+// which is how they can be listed at all - and how their icons still render.
+let currentTab = "installed";
+// Apps known only from other phones stay behind a click: this list is about
+// what THIS phone lost, not everything SideKit has ever seen.
+let showAllFromMemory = false;
+
+function showTab(tab) {
+  currentTab = tab;
+  document.getElementById("tabInstalled").classList.toggle("active", tab === "installed");
+  document.getElementById("tabVanished").classList.toggle("active", tab === "vanished");
+  document.getElementById("tabQueue").classList.toggle("active", tab === "queue");
+  if (tab === "installed") loadApps();
+  else if (tab === "vanished") loadVanished();
+  else renderJobs();
+}
+
+// Filters whichever list is on screen, by name, bundle id or App Store id -
+// they're all in the row's text already. The summary line at the top of the
+// vanished list is not a result and stays put.
+function filterList() {
+  const query = document.getElementById("appSearch").value.trim().toLowerCase();
+  document.querySelectorAll("#appList .app-row").forEach(row => {
+    if (row.classList.contains("note-row")) return;
+    row.style.display = !query || row.textContent.toLowerCase().includes(query) ? "" : "none";
+  });
+}
+
+async function loadVanished() {
+  const list = document.getElementById("appList");
+  if (!activeUdid) {
+    list.innerHTML = "<div class='empty-state'>Выбери устройство слева</div>";
+    return;
+  }
+  list.innerHTML = "<div class='empty-state'>Ищу приложения, которые пропали с телефона...</div>";
+  let result;
+  try {
+    result = await api("GET", `/api/vanished-apps?udid=${encodeURIComponent(activeUdid)}` +
+                              (showAllFromMemory ? "&all=1" : ""));
+  } catch (e) {
+    list.innerHTML = "<div class='empty-state'>Не удалось получить список: " + e + "</div>";
+    return;
+  }
+  if (!result.ok) {
+    list.innerHTML = "<div class='empty-state'>" + (result.error || "Не удалось получить список") + "</div>";
+    return;
+  }
+  if (!result.apps.length) {
+    list.innerHTML = "<div class='empty-state'>Пропавших приложений нет — всё на месте.</div>";
+    return;
+  }
+
+  // Apps whose icon was deleted too leave no trace on the phone, so they
+  // can't be "found" there - they come from SideKit's own memory instead.
+  const vanished = result.apps.filter(a => a.group === "vanished");
+  const library = result.apps.filter(a => a.group === "library");
+  const others = result.apps.filter(a => a.group === "other");
+
+  const ready = vanished.filter(a => a.item_id).length;
+  const fromFile = vanished.filter(a => !a.item_id && a.local_ipa).length;
+  list.innerHTML = "";
+  const note = document.createElement("div");
+  note.className = "app-row note-row";
+  note.style.color = "var(--muted)";
+  note.style.display = "block";
+  let text = vanished.length
+    ? `Пропало с этого iPhone: ${vanished.length}. Можно вернуть из App Store: ${ready}`
+    : "С этого iPhone ничего не пропало — либо значки удалили вместе с приложениями.";
+  if (vanished.length && fromFile) text += `, из файлов на этом Маке: ${fromFile}`;
+  const rest = vanished.length - ready - fromFile;
+  if (vanished.length && rest) text += `. Для остальных ${rest} нет ни ID, ни файла — такие приложения ставились не из App Store, Apple их не отдаст.`;
+  if (library.length) text += ` Ниже — ещё ${library.length}, которые раньше стояли на этом телефоне.`;
+  note.textContent = text;
+
+  if (result.others_count && !showAllFromMemory) {
+    const more = document.createElement("button");
+    more.className = "link-btn";
+    more.style.cssText = "background:none; color:var(--accent); padding:6px 0 0; width:auto; margin:0;";
+    more.textContent = `Показать ещё ${result.others_count} приложений из памяти SideKit (с других телефонов)`;
+    more.onclick = () => { showAllFromMemory = true; loadVanished(); };
+    note.appendChild(document.createElement("br"));
+    note.appendChild(more);
+  }
+
+
+  list.appendChild(note);
+
+  const renderRow = (a) => {
+    const row = document.createElement("div");
+    row.className = "app-row";
+    row.appendChild(appAvatar(a.name, a.bundle_id));
+
+    const info = document.createElement("div");
+    info.className = "app-info";
+    const nameEl = document.createElement("div");
+    nameEl.className = "app-name";
+    nameEl.textContent = a.name;
+    const metaEl = document.createElement("div");
+    metaEl.className = "app-meta";
+    const bits = [a.bundle_id];
+    if (a.item_id) bits.push(`ID ${a.item_id}`);
+    if (a.local_ipa) {
+      bits.push("файл: " + a.local_ipa.path.split("/").pop());
+      // Whose Apple ID paid for the file decides where it will run, so it
+      // belongs on screen rather than in a surprise at first launch.
+      if (a.local_ipa.bought_by) bits.push("куплен: " + a.local_ipa.bought_by);
+    }
+    metaEl.textContent = bits.join(" · ");
+    info.appendChild(nameEl);
+    info.appendChild(metaEl);
+    row.appendChild(info);
+
+    // A file on disk beats a manual id: it needs no Apple licence and no
+    // guessing, so those rows get a button instead of an empty text box.
+    let idField = null;
+    if (!a.item_id && !a.local_ipa) {
+      idField = document.createElement("input");
+      idField.className = "item-id";
+      idField.placeholder = "App Store ID";
+      idField.inputMode = "numeric";
+      row.appendChild(idField);
+    }
+
+    // Two routes home, and they fail for different reasons: App Store needs
+    // a licence on the signed-in account, a file needs no account at all.
+    // When both exist, offer both rather than guessing.
+    if (a.item_id || !a.local_ipa) {
+      const btn = document.createElement("button");
+      btn.textContent = "Вернуть";
+      btn.onclick = () => restoreApp(a, btn, idField);
+      row.appendChild(btn);
+    }
+    if (a.local_ipa) {
+      const fileBtn = document.createElement("button");
+      fileBtn.textContent = a.item_id ? "Из файла" : "Вернуть из файла";
+      fileBtn.onclick = () => installFromFile(a, fileBtn);
+      row.appendChild(fileBtn);
+    }
+    list.appendChild(row);
+  };
+
+  vanished.forEach(renderRow);
+  if (library.length) {
+    const divider = document.createElement("div");
+    divider.className = "app-row note-row";
+    divider.style.cssText = "color:var(--muted); background:#fafafc; font-weight:500;";
+    divider.textContent = "Раньше стояло на этом iPhone — можно вернуть";
+    list.appendChild(divider);
+    library.forEach(renderRow);
+  }
+  if (others.length) {
+    const divider = document.createElement("div");
+    divider.className = "app-row note-row";
+    divider.style.cssText = "color:var(--muted); background:#fafafc; font-weight:500;";
+    divider.textContent = "С других телефонов — Apple отдаст их только своему аккаунту";
+    list.appendChild(divider);
+    others.forEach(renderRow);
+  }
+  filterList();   // keep an active search applied across refreshes
+}
+
+// Reinstall from an .ipa already on this Mac. No Apple ID and no licence
+// involved - the file is the app.
+async function installFromFile(app, btn) {
+  const msg = document.getElementById("mainMsg");
+  msg.style.display = "none";
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.innerHTML = '<span class="spinner"></span>...';
+  showProgress(`Ставлю ${app.name} из файла...`, app.local_ipa.path, true);
+
+  try {
+    showBannerActions(false);   // install: cancel only, no pausing
+    const started = await api("POST", "/api/install",
+      { ipa_path: app.local_ipa.path, udid: activeUdid });
+    if (!started.ok) {
+      hideProgress();
+      showMsg(msg, started.error || "Не получилось начать установку", "err");
+      btn.disabled = false;
+      btn.textContent = originalText;
+      return;
+    }
+    while (true) {
+      await new Promise(r => setTimeout(r, 900));
+      const p = await api("GET", "/api/install-progress");
+      updateProgressPercent(p.percent || 0);
+      if (p.status === "cancelled") {
+        hideProgress();
+        showMsg(msg, "Установка отменена.", "info");
+        btn.disabled = false;
+        btn.textContent = originalText;
+        return;
+      }
+      if (p.status === "done") {
+        hideProgress();
+        showMsg(msg, `${app.name} снова установлено на iPhone.`, "ok");
+        btn.textContent = "Готово";
+        loadVanished();
+        return;
+      }
+      if (p.status === "error") {
+        hideProgress();
+        showMsg(msg, p.error || "Установка не удалась", "err");
+        btn.disabled = false;
+        btn.textContent = originalText;
+        return;
+      }
+    }
+  } catch (e) {
+    hideProgress();
+    showMsg(msg, "Ошибка: " + e, "err");
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+
+async function restoreApp(app, btn, idField) {
+  const msg = document.getElementById("mainMsg");
+  msg.style.display = "none";
+  if (!loggedIn) {
+    showMsg(msg, "Сначала войди через Apple ID слева — приложение скачивается из твоего аккаунта.", "err");
+    return;
+  }
+  const manualId = idField && idField.value.trim() ? idField.value.trim() : null;
+  if (idField && !manualId) {
+    showMsg(msg, "Впиши App Store ID этого приложения — это число из адреса его страницы в App Store (после «id»).", "err");
+    return;
+  }
+  addJob({ kind: "restore", name: app.name, app, manualId });
+  showMsg(msg, `${app.name} — в списке. Ход дела виден на вкладке «Список».`, "info");
+}
+
+async function runRestoreJob(job) {
+  // runRestore рисует состояние на кнопке; в очереди кнопки нет, поэтому
+  // подсовываем пустышку - писать ей некуда, и это нормально.
+  const ghost = { disabled: false, textContent: "Вернуть", innerHTML: "" };
+  try {
+    const res = await runRestore(job.app, ghost, job.manualId);
+    return res || { ok: true, result: "снова на iPhone" };
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+async function runRestore(app, btn, manualId) {
+  const msg = document.getElementById("mainMsg");
+  btn.disabled = true;
+  const originalText = btn.textContent.includes("очеред") ? "Вернуть" : btn.textContent;
+  btn.innerHTML = '<span class="spinner"></span>...';
+  showProgress(`Возвращаю ${app.name}...`, "Скачиваю из App Store", true);
+
+  transferPaused = false;
+  showBannerActions(true);
+
+  try {
+    // udid pins the install to the phone actually selected: with two devices
+    // plugged in, an untargeted install can land on the wrong one.
+    const started = await api("POST", "/api/restore",
+      { bundle_id: app.bundle_id, item_id: manualId, name: app.name, udid: activeUdid });
+    if (!started.ok) {
+      hideProgress();
+      return { ok: false, error: started.error || "не получилось начать" };
+    }
+
+    while (true) {
+      await new Promise(r => setTimeout(r, 900));
+      const p = await api("GET", "/api/restore-progress");
+      if (p.stage === "download") {
+        const size = (p.downloaded && p.total) ? ` · ${p.downloaded} / ${p.total}` : "";
+        showProgress(`Возвращаю ${app.name}...`,
+          (p.paused ? "Пауза" : "Скачиваю из App Store") + size, true);
+        updateProgressPercent(p.percent || 0);
+        showBannerActions(true);
+      } else if (p.stage === "install") {
+        showProgress(`Возвращаю ${app.name}...`, "Устанавливаю на iPhone", true);
+        updateProgressPercent(p.percent || 0);
+        showBannerActions(false);   // an install can be stopped, not paused
+      } else if (p.stage === "cancelled") {
+        hideProgress();
+        return { ok: false, cancelled: true, error: "отменено" };
+      } else if (p.stage === "done") {
+        hideProgress();
+        loadVanished();
+        return { ok: true, result: "снова на iPhone" };
+      } else if (p.stage === "error") {
+        hideProgress();
+        return { ok: false, error: p.error || "не получилось вернуть" };
+      }
+    }
+  } catch (e) {
+    hideProgress();
+    return { ok: false, error: String(e) };
+  }
+}
+
+async function loadApps() {
+  const list = document.getElementById("appList");
+  if (!activeUdid) {
+    list.innerHTML = "<div class='empty-state'>Выбери устройство слева, чтобы увидеть его приложения</div>";
+    return;
+  }
+  list.innerHTML = "<div class='empty-state'>Загружаю список приложений...</div>";
+  const result = await api("GET", `/api/apps?udid=${encodeURIComponent(activeUdid)}&system=0`);
+  if (!result.ok || !result.apps) {
+    list.innerHTML = "<div class='empty-state'>Не получилось получить список. Убедись, что телефон разблокирован и «Доверие» подтверждено.</div>";
+    return;
+  }
+  if (!result.apps.length) {
+    list.innerHTML = "<div class='empty-state'>Приложений не найдено.</div>";
+    return;
+  }
+  list.innerHTML = "";
+  result.apps.forEach(a => {
+    const row = document.createElement("div");
+    row.className = "app-row";
+    row.appendChild(appAvatar(a.name, a.bundle_id));
+    const info = document.createElement("div");
+    info.className = "app-info";
+    const nameEl = document.createElement("div");
+    nameEl.className = "app-name";
+    nameEl.textContent = a.name;
+    const metaEl = document.createElement("div");
+    metaEl.className = "app-meta";
+    metaEl.textContent = `${a.bundle_id} · ${a.version}`;
+    info.appendChild(nameEl);
+    info.appendChild(metaEl);
+    row.appendChild(info);
+    const btn = document.createElement("button");
+    btn.textContent = "Выгрузить IPA";
+    btn.onclick = () => exportIpa(a.bundle_id, a.name, btn);
+    row.appendChild(btn);
+    list.appendChild(row);
+  });
+  filterList();   // keep an active search applied across refreshes
+}
+
+async function exportIpa(bundleId, name, btn) {
+  const msg = document.getElementById("mainMsg");
+  msg.style.display = "none";
+  if (!loggedIn) {
+    showMsg(msg, "Сначала войди через Apple ID слева — выгрузка использует твой аккаунт, чтобы скачать подлинный .ipa этого приложения.", "err");
+    const box = document.getElementById("appleBox");
+    box.scrollIntoView({ behavior: "smooth", block: "center" });
+    box.classList.add("attention");
+    setTimeout(() => box.classList.remove("attention"), 2200);
+    return;
+  }
+  // Никаких «куда сохранить»: файл кладётся на Рабочий стол под названием
+  // приложения. Можно нажимать сразу на нескольких - встанут в очередь.
+  addJob({ kind: "export", name: name || bundleId, bundle_id: bundleId });
+  btn.textContent = "В списке";
+  setTimeout(() => { btn.textContent = "Выгрузить IPA"; }, 1500);
+  showMsg(msg, `${name} — в списке, сохранится на Рабочий стол.`, "info");
+}
+
+// ---- установка .ipa: сразу сколько нужно, одной кнопкой ----
+async function installFlow() {
+  const msg = document.getElementById("mainMsg");
+  msg.style.display = "none";
+  if (!activeUdid) {
+    showMsg(msg, "Сначала выбери устройство слева.", "err");
+    return;
+  }
+  const installBtn = document.querySelector('.actions button:not(.secondary)');
+  installBtn.disabled = true;
+  showProgress("Открываю окно выбора файлов...",
+               "Выдели сразу все .ipa, которые нужно поставить.");
+  let picked;
+  try {
+    picked = await api("POST", "/api/pick-ipa-files", {});
+  } catch (e) {
+    hideProgress();
+    installBtn.disabled = false;
+    showMsg(msg, "Ошибка: " + e, "err");
+    return;
+  }
+  hideProgress();
+  installBtn.disabled = false;
+  if (!picked.ok) {
+    if (!picked.cancelled) showMsg(msg, picked.error || "Не получилось открыть окно выбора файлов", "err");
+    return;
+  }
+  picked.paths.forEach(path => {
+    addJob({ kind: "install", name: path.split(/[\\/]/).pop(), path_src: path });
+  });
+  if (picked.skipped) {
+    showMsg(msg, `Взял ${picked.paths.length}, пропустил ${picked.skipped} — это не .ipa.`, "info");
+  }
+}
+
+// ---- fallback: search App Store ----
+async function doSearch() {
+  const term = document.getElementById("searchTerm").value.trim();
+  if (!term) return;
+  const box = document.getElementById("searchResults");
+  box.innerHTML = "<div class='empty-hint'>Ищу...</div>";
+  const result = await api("GET", "/api/search?q=" + encodeURIComponent(term) + "&limit=8");
+  if (!result.ok || !result.results || !result.results.length) {
+    box.innerHTML = "<div class='empty-hint'>Ничего не нашлось.</div>";
+    return;
+  }
+  box.innerHTML = "";
+  result.results.forEach(app => {
+    const bundleId = app.bundleID || app.bundleId || app.bundle_id || "";
+    const name = app.name || app.trackName || bundleId;
+    const row = document.createElement("div");
+    row.className = "app-row";
+    row.appendChild(appAvatar(name, bundleId));
+    const info = document.createElement("div");
+    info.className = "app-info";
+    const nameEl = document.createElement("div");
+    nameEl.className = "app-name";
+    nameEl.textContent = name;
+    const metaEl = document.createElement("div");
+    metaEl.className = "app-meta";
+    metaEl.textContent = bundleId;
+    info.appendChild(nameEl);
+    info.appendChild(metaEl);
+    row.appendChild(info);
+    const btn = document.createElement("button");
+    btn.textContent = "Скачать";
+    btn.onclick = () => exportIpa(bundleId, name, btn);
+    row.appendChild(btn);
+    box.appendChild(row);
+  });
+}
+
+// ---- boot ----
+async function checkAppleIdStatus() {
+  try {
+    const result = await api("GET", "/api/apple-id-status");
+    loggedIn = !!result.logged_in;
+    setAppleState(loggedIn ? "account" : "credentials", result.email);
+  } catch (e) { /* not fatal, login form still works */ }
+}
+
+(async function boot() {
+  document.getElementById("tabInstalled").classList.add("active");
+  await refreshStatus();
+  await checkAppleIdStatus();
+  await loadDevices();
+  checkUpdateNote();
+  setInterval(checkUpdateNote, 600000);
+})();
+</script>
+</body>
+</html>

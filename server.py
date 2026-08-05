@@ -48,7 +48,25 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-RESOURCES_DIR = Path(__file__).resolve().parent
+def _resources_dir() -> Path:
+    """Папка программы: там лежат ipatool, zsign, значок и родное окно.
+    Обновлённый движок работает из отдельной папки обновлений, и искать
+    соседей рядом с собой ему нельзя - их там нет. Настоящий адрес приходит
+    в переменной SIDEKIT_HOME, а если её нет - берём привычные места."""
+    told = os.environ.get("SIDEKIT_HOME")
+    if told and Path(told).is_dir():
+        return Path(told)
+    here = Path(__file__).resolve().parent
+    if (here / "bin").is_dir() or (here / "index.html").exists():
+        return here
+    for known in (Path("/Applications/SideKit.app/Contents/Resources"),
+                  Path(os.environ.get("LOCALAPPDATA", "")) / "SideKit"):
+        if (known / "index.html").exists():
+            return known
+    return here
+
+
+RESOURCES_DIR = _resources_dir()
 BIN_DIR = RESOURCES_DIR / "bin"
 DOWNLOADS_DIR = Path.home() / "Downloads" / "SideKit"
 INDEX_HTML = RESOURCES_DIR / "index.html"
@@ -84,7 +102,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-08-06.54-report-btn"
+SERVER_VERSION = "2026-08-06.57-home"
 
 
 # ---------------------------------------------------------------------------
@@ -2637,7 +2655,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/status":
                 status = get_status()
                 status["version"] = SERVER_VERSION
-                status["update"] = _update_note
+                status["update"] = update_note()
                 self._send_json(status)
             elif path == "/api/devices":
                 devices = list_devices()
@@ -2742,6 +2760,8 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     dest = str(auto_ipa_path(body.get("name", ""), body.get("bundle_id", "")))
                 self._send_json(ipatool_download(body.get("bundle_id", ""), bool(body.get("purchase")), dest))
+            elif path == "/api/apply-update":
+                self._send_json(apply_update_now())
             elif path == "/api/report":
                 self._send_json(build_report())
             elif path == "/api/pick-ipa-files":
@@ -2930,6 +2950,7 @@ def adopt_update_if_ready() -> None:
     if not candidate.exists() or _version_of(candidate) <= SERVER_VERSION:
         return
     os.environ["SIDEKIT_UPDATED"] = "1"
+    os.environ["SIDEKIT_HOME"] = str(RESOURCES_DIR)
     try:
         os.execv(PYTHON_EXE, [PYTHON_EXE, str(candidate)] + sys.argv[1:])
     except Exception:
@@ -2954,6 +2975,7 @@ def check_for_updates() -> None:
             if len(data) < 1000:
                 return              # подозрительно мало - не берём
             (staging / name).write_bytes(data)
+        (staging / "version.json").write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
 
         # Движок проверяем запуском: сломанное обновление хуже отсутствия.
         check = subprocess.run([PYTHON_EXE, str(staging / "server.py"), "--selftest"],
@@ -2967,6 +2989,52 @@ def check_for_updates() -> None:
                         "notes": str(info.get("notes", ""))}
     except Exception:
         pass
+
+
+_server = None
+_server_port = 0
+
+
+def apply_update_now() -> dict:
+    """Перезапускает движок на скачанной версии, не закрывая окно: новый
+    занимает тот же порт, поэтому страница просто перезагружается."""
+    candidate = UPDATE_DIR / "server.py"
+    if not candidate.exists() or _version_of(candidate) <= SERVER_VERSION:
+        return {"ok": False, "error": "Обновлять нечего — установлена свежая версия."}
+
+    def restart():
+        time.sleep(0.6)             # дать ответу дойти до окна
+        try:
+            if _server is not None:
+                _server.server_close()
+        except Exception:
+            pass
+        os.environ["SIDEKIT_UPDATED"] = "1"
+        os.environ["SIDEKIT_HOME"] = str(RESOURCES_DIR)
+        args = [PYTHON_EXE, str(candidate), "--port", str(_server_port)]
+        try:
+            os.execv(PYTHON_EXE, args)
+        except Exception:
+            subprocess.Popen(args, **NO_CONSOLE)
+            os._exit(0)
+
+    threading.Thread(target=restart, daemon=True).start()
+    return {"ok": True, "version": _version_of(candidate), "port": _server_port}
+
+
+def update_note() -> dict:
+    """Есть ли рядом версия свежее той, что работает сейчас. Считается по
+    файлам, а не по памяти: обновление могло скачаться в прошлый запуск."""
+    candidate = UPDATE_DIR / "server.py"
+    version = _version_of(candidate) if candidate.exists() else ""
+    if not version or version <= SERVER_VERSION:
+        return {}
+    notes = ""
+    try:
+        notes = str(json.loads((UPDATE_DIR / "version.json").read_text(encoding="utf-8")).get("notes", ""))
+    except Exception:
+        pass
+    return {"available": True, "version": version, "notes": notes}
 
 
 def active_index_html() -> Path:
@@ -3033,6 +3101,11 @@ def main():
     threading.Thread(target=check_for_updates, daemon=True).start()
 
     existing_url = find_existing_instance_url()
+    if existing_url and (UPDATE_DIR / "server.py").exists() \
+            and _version_of(UPDATE_DIR / "server.py") > SERVER_VERSION:
+        # Рядом лежит версия свежее той, что уже работает. Цепляться к
+        # старому движку нельзя - иначе обновление не применится никогда.
+        existing_url = None
     if existing_url:
         # SideKit is already running on the SAME version - just point at the
         # FIRST instance instead of starting a second, competing
@@ -3046,8 +3119,21 @@ def main():
     # keep silently answering for a newer download.
     shut_down_stale_instance()
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    wanted_port = 0
+    if "--port" in sys.argv:
+        try:
+            wanted_port = int(sys.argv[sys.argv.index("--port") + 1])
+        except Exception:
+            wanted_port = 0
+    ThreadingHTTPServer.allow_reuse_address = True
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", wanted_port), Handler)
+    except OSError:
+        # Порт мог не успеть освободиться - берём любой свободный.
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     port = server.server_address[1]
+    global _server, _server_port
+    _server, _server_port = server, port
     write_lock(port)
     url = f"http://127.0.0.1:{port}/"
 

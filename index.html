@@ -258,6 +258,12 @@
   .update-note.on { display: block; }
   .report-btn { margin-top: 14px; opacity: .75; font-size: 11.5px; }
   .report-btn:hover { opacity: 1; }
+  .update-btn {
+    margin-top: 8px; width: 100%; padding: 6px 10px; border: none;
+    border-radius: 7px; background: #0071e3; color: #fff; font-size: 12px;
+    cursor: pointer;
+  }
+  .update-btn:disabled { opacity: .6; cursor: default; }
 </style>
 </head>
 <body>
@@ -566,15 +572,46 @@ async function checkUpdateNote() {
   try {
     const st = await api("GET", "/api/status");
     const box = document.getElementById("updateNote");
-    if (st.update && st.update.available) {
-      box.classList.add("on");
-      box.textContent = "Есть обновление " + st.update.version
-        + (st.update.notes ? " — " + st.update.notes : "")
-        + ". Оно уже скачано: закрой и открой SideKit.";
-    } else {
-      box.classList.remove("on");
-    }
+    if (!st.update || !st.update.available) { box.classList.remove("on"); return; }
+    box.classList.add("on");
+    box.innerHTML = "";
+    const text = document.createElement("div");
+    text.textContent = "Есть обновление" + (st.update.notes ? ": " + st.update.notes : "") + ".";
+    box.appendChild(text);
+    const btn = document.createElement("button");
+    btn.className = "update-btn";
+    btn.textContent = "Обновить";
+    btn.onclick = () => applyUpdate(btn);
+    box.appendChild(btn);
   } catch (e) { /* без интернета - молчим */ }
+}
+
+// Обновление применяется на месте: движок перезапускается на том же адресе,
+// поэтому окно просто перезагружает страницу. Закрывать программу не надо.
+async function applyUpdate(btn) {
+  btn.disabled = true;
+  btn.textContent = "Обновляю…";
+  try {
+    const res = await api("POST", "/api/apply-update", {});
+    if (!res.ok) {
+      btn.disabled = false;
+      btn.textContent = "Обновить";
+      showMsg(document.getElementById("mainMsg"), res.error || "Не получилось обновить", "err");
+      return;
+    }
+    // Ждём, пока новый движок поднимется на том же порту.
+    for (let i = 0; i < 40; i++) {
+      await new Promise(r => setTimeout(r, 700));
+      try {
+        const st = await api("GET", "/api/status");
+        if (st.version === res.version) { location.reload(); return; }
+      } catch (e) { /* поднимается */ }
+    }
+    location.reload();
+  } catch (e) {
+    // Связь рвётся ровно в момент перезапуска - это нормально.
+    setTimeout(() => location.reload(), 3000);
+  }
 }
 
 function togglePassword() {

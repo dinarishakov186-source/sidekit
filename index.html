@@ -256,6 +256,8 @@
     background: #eaf3ff; color: #14508c; font-size: 11.5px; line-height: 1.35;
   }
   .update-note.on { display: block; }
+  .report-btn { margin-top: 14px; opacity: .75; font-size: 11.5px; }
+  .report-btn:hover { opacity: 1; }
 </style>
 </head>
 <body>
@@ -266,7 +268,6 @@
     <div class="side-label">Устройства</div>
     <div id="deviceItems"><div class="empty-hint">Подключи iPhone по USB...</div></div>
     <button class="sidebar-btn" onclick="loadDevices()">↻ Обновить устройства</button>
-    <button class="sidebar-btn" onclick="sendReport(this)">🧾 Сообщить об ошибке</button>
     <div id="updateNote" class="update-note"></div>
 
     <div class="apple-box" id="appleBox">
@@ -306,6 +307,10 @@
 
       <div class="msg" id="loginMsg" style="margin-top:6px"></div>
     </div>
+
+    <!-- В самом низу и отдельно от кнопок устройств: жать её нужно редко,
+         а попасть по ней случайно - неприятно. -->
+    <button class="sidebar-btn report-btn" onclick="sendReport(this)">🧾 Сообщить об ошибке</button>
   </div>
 
   <div id="main">

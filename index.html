@@ -486,9 +486,9 @@ async function runSetup() {
 
   const status = await api("GET", "/api/status");
   const steps = [
-    { key: "pymobiledevice3", url: "/api/setup/pymobiledevice3", note: "обычно 1-3 минуты в первый раз, тянет зависимости" },
-    { key: "ipatool", url: "/api/setup/ipatool", note: "скачивание бинарника, ~10 секунд" },
-    { key: "zsign", url: "/api/setup/zsign", note: "необязательно, можно пропустить при ошибке" },
+    { key: "pymobiledevice3", note: "обычно 1-3 минуты в первый раз, тянет зависимости" },
+    { key: "ipatool", note: "скачивание, около 10 секунд" },
+    { key: "zsign", note: "необязательно" },
   ];
 
   for (const step of steps) {
@@ -499,54 +499,36 @@ async function runSetup() {
     appendLog(log, `Устанавливаю ${step.key} (${step.note})...`);
     const t0 = Date.now();
     try {
-      const result = await api("POST", step.url);
-      const secs = ((Date.now() - t0) / 1000).toFixed(1);
-      (result.log || []).forEach(line => appendLog(log, "  " + line));
-      appendLog(log, `${step.key}: ${result.ok ? "готово" : "не получилось"} (${secs} c)`);
+      // Работа идёт в фоне, а мы только спрашиваем, как она продвигается:
+      // раньше окно ждало ответа на один долгий запрос и обрывало его само.
+      await api("POST", "/api/setup/" + step.key, {});
+      let shown = 0;
+      let state = {};
+      for (let i = 0; i < 900; i++) {
+        await new Promise(r => setTimeout(r, 1000));
+        state = await api("GET", "/api/setup-progress?step=" + step.key);
+        (state.log || []).slice(shown).forEach(line => appendLog(log, "  " + line));
+        shown = (state.log || []).length;
+        if (state.done) break;
+      }
+      const secs = ((Date.now() - t0) / 1000).toFixed(0);
+      appendLog(log, `${step.key}: ${state.ok ? "готово" : "не получилось"} (${secs} c)`);
     } catch (e) {
-      appendLog(log, `${step.key}: ошибка сети - ${e}`);
+      appendLog(log, `${step.key}: не получилось спросить о ходе установки - ${e}`);
     }
   }
 
-  const finalStatus = await api("GET", "/api/status");
-  if (finalStatus.pymobiledevice3 && finalStatus.ipatool) {
-    banner.style.display = "none";
-    appendLog(log, "Всё готово, можно пользоваться.");
+  const after = await refreshStatus();
+  if (after.pymobiledevice3 && after.ipatool) {
+    appendLog(log, "Всё на месте. Можно подключать iPhone.");
+    loadDevices();
   } else {
-    appendLog(log, "Часть компонентов не встала — можно нажать «Настроить» ещё раз, повторная попытка часто помогает.");
+    appendLog(log, "Часть компонентов не встала — нажми «Настроить» ещё раз, "
+      + "повторная попытка часто помогает.");
   }
   btn.disabled = false;
 }
 
-// ---- Apple ID ----
-// The Apple ID box has three faces: ask for credentials, ask for the code,
-// or simply state who is signed in. Only one is ever on screen, which is
-// what keeps it small.
-function setAppleState(state, email) {
-  document.getElementById("appleCredentials").style.display = state === "credentials" ? "" : "none";
-  document.getElementById("appleTwoFactor").style.display = state === "2fa" ? "" : "none";
-  document.getElementById("appleAccount").style.display = state === "account" ? "" : "none";
-  document.getElementById("appleDot").classList.toggle("ok", state === "account");
-  if (state === "account") document.getElementById("accountEmail").textContent = email || "";
-  if (state === "2fa") setTimeout(() => document.getElementById("loginCode").focus(), 50);
-}
-
-// Six digits is the whole code - there is nothing to decide afterwards, so
-// submit it instead of making the user reach for the button again.
-function onCodeInput() {
-  const field = document.getElementById("loginCode");
-  field.value = field.value.replace(/\D/g, "").slice(0, 6);
-  if (field.value.length === 6) doLogin();
-}
-
-function cancelTwoFactor() {
-  document.getElementById("loginCode").value = "";
-  document.getElementById("loginMsg").style.display = "none";
-  setAppleState("credentials");
-}
-
-// Отчёт о неполадке: программа сама собирает всё нужное в один файл на
-// Рабочем столе, его остаётся переслать.
 async function sendReport(btn) {
   const msg = document.getElementById("mainMsg");
   const original = btn.textContent;

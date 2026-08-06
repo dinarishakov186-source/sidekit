@@ -102,7 +102,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-08-06.61-python"
+SERVER_VERSION = "2026-08-06.62-setup"
 
 
 # ---------------------------------------------------------------------------
@@ -507,6 +507,11 @@ def install_ipatool(log: list) -> bool:
 
 
 def install_zsign(log: list) -> bool:
+    if IS_MAC and machine_arch() != "arm64":
+        log.append("zsign под Intel-Маки в свежих выпусках не публикуют. "
+                   "Для скачивания и установки приложений через Apple ID он не нужен - пропускаю.")
+        return True
+
     if IS_WINDOWS:
         log.append("zsign под Windows не публикуют — пропускаю "
                    "(он нужен только для переподписи не-AppStore .ipa).")
@@ -520,6 +525,52 @@ def install_zsign(log: list) -> bool:
             "(его проект пока не всегда публикует сборку под Intel Mac для каждой версии)."
         )
     return ok
+
+
+_setup_jobs: dict = {}
+_setup_lock = threading.Lock()
+
+SETUP_STEPS = {
+    "pymobiledevice3": lambda log: pip_install_pymobiledevice3(log),
+    "ipatool": lambda log: install_ipatool(log),
+    "zsign": lambda log: install_zsign(log),
+}
+
+
+def start_setup_step(name: str) -> dict:
+    """Запускает доустановку в фоне. Раньше окно ждало ответа на один запрос, а
+    установка библиотеки идёт минутами - и окно обрывало запрос по своему
+    таймауту («The request timed out»), хотя установка ещё шла."""
+    worker = SETUP_STEPS.get(name)
+    if worker is None:
+        return {"ok": False, "error": "Неизвестный шаг: " + str(name)}
+    with _setup_lock:
+        job = _setup_jobs.get(name)
+        if job and job.get("running"):
+            return {"ok": True, "started": True, "already": True}
+        job = {"running": True, "done": False, "ok": None, "log": []}
+        _setup_jobs[name] = job
+
+    def run_step():
+        try:
+            result = worker(job["log"])
+        except Exception as e:
+            job["log"].append("Сбой: " + str(e))
+            result = False
+        job["ok"] = bool(result)
+        job["running"] = False
+        job["done"] = True
+
+    threading.Thread(target=run_step, daemon=True).start()
+    return {"ok": True, "started": True}
+
+
+def setup_step_state(name: str) -> dict:
+    job = _setup_jobs.get(name)
+    if not job:
+        return {"running": False, "done": False, "log": []}
+    return {"running": job["running"], "done": job["done"],
+            "ok": job["ok"], "log": list(job["log"])}
 
 
 def run_setup() -> dict:
@@ -2764,6 +2815,10 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self.send_response(204)
                     self.end_headers()
+            elif path == "/api/setup-progress":
+                from urllib.parse import parse_qs, urlparse
+                step = (parse_qs(urlparse(self.path).query).get("step") or [""])[0]
+                self._send_json(setup_step_state(step))
             elif path == "/api/status":
                 status = get_status()
                 status["version"] = SERVER_VERSION
@@ -2843,18 +2898,8 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/api/setup":
                 self._send_json(run_setup())
-            elif path == "/api/setup/pymobiledevice3":
-                log: list = []
-                ok = pip_install_pymobiledevice3(log)
-                self._send_json({"ok": ok, "log": log})
-            elif path == "/api/setup/ipatool":
-                log = []
-                ok = install_ipatool(log)
-                self._send_json({"ok": ok, "log": log})
-            elif path == "/api/setup/zsign":
-                log = []
-                ok = install_zsign(log)
-                self._send_json({"ok": ok, "log": log})
+            elif path.startswith("/api/setup/"):
+                self._send_json(start_setup_step(path.rsplit("/", 1)[-1]))
             elif path == "/api/logout":
                 self._send_json(ipatool_logout())
             elif path == "/api/login":

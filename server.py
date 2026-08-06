@@ -102,7 +102,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-08-06.57-home"
+SERVER_VERSION = "2026-08-06.60-certs"
 
 
 # ---------------------------------------------------------------------------
@@ -784,14 +784,38 @@ def ipatool_login(email: str, password: str, auth_code: str | None, force: bool 
             return {"ok": False, "confirm_login": True, "error": doubt}
 
     prepare_keychain_slot()
-    cmd = [tool, "auth", "login", "-e", email, "-p", password, "--non-interactive", "--format", "json"] + ipatool_keychain_args()
-    if auth_code:
-        cmd += ["--auth-code", auth_code]
+
+    def build_cmd(binary: str) -> list:
+        line = [binary, "auth", "login", "-e", email, "-p", password,
+                "--non-interactive", "--format", "json"] + ipatool_keychain_args()
+        if auth_code:
+            line += ["--auth-code", auth_code]
+        return line
+
+    cmd = build_cmd(tool)
     # A longer timeout here on purpose: on the first ever run, macOS pops a
     # "ipatool wants to access your keychain" permission dialog while this
     # is running, and the command genuinely blocks until the user answers
     # it. 60s isn't unreasonable for "go find that dialog and click it".
     rc, out, err = run(cmd, timeout=90)
+
+    # Apple иногда отвечает 404 на самом последнем шаге - когда отправляешь
+    # код. Свежий ipatool сам выбирает, на какой сервер Apple идти, и порой
+    # выбирает не тот. Пробуем ещё раз, а потом - запасной ipatool постарше,
+    # который ходит по постоянному адресу.
+    def looks_like_apple_404(text: str) -> bool:
+        low = text.lower()
+        return "404" in low and ("unexpected response" in low or "not found" in low)
+
+    if looks_like_apple_404((out or "") + (err or "")):
+        remember_error("вход в Apple ID", "Apple ответила 404, пробую ещё раз")
+        time.sleep(1.5)
+        rc, out, err = run(build_cmd(tool), timeout=90)   # бывает разовым
+    if looks_like_apple_404((out or "") + (err or "")):
+        spare = ensure_legacy_ipatool()                   # при нужде докачает
+        if spare:
+            time.sleep(1)
+            rc, out, err = run(build_cmd(str(spare)), timeout=120)
 
     # Read BOTH streams. ipatool prints its result as JSON, but sends failures
     # (including "2FA code is required") to stderr - looking only at stdout is
@@ -871,6 +895,8 @@ def ipatool_login(email: str, password: str, auth_code: str | None, force: bool 
         _write_login_state(email)
         _invalidate_auth_status()
         return {"ok": True, "raw": combined}
+
+    remember_error("вход в Apple ID", combined)
 
     # Failed: hand back a sentence, not ipatool's JSON. "something went wrong"
     # is what Apple returns for a rejected code as well as for bad
@@ -2920,10 +2946,30 @@ def update_base_url() -> str:
     return UPDATE_BASE
 
 
+def _https_context():
+    """Проверка сертификатов. На Windows у Python бывает пустой список
+    доверенных центров - тогда любая загрузка падает с CERTIFICATE_VERIFY_FAILED,
+    и обновления молча не приезжают. Набор сертификатов есть в certifi, он
+    ставится вместе с библиотекой для iPhone."""
+    import ssl
+    # Сначала certifi: на Windows системный список бывает и непустым, но без
+    # нужных центров - тогда загрузка всё равно падает. Набор certifi полный.
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        pass
+    try:
+        return ssl.create_default_context()
+    except Exception:
+        return None
+
+
 def _fetch(url: str, timeout: int = 20) -> bytes:
     import urllib.request
     request = urllib.request.Request(url, headers={"User-Agent": "SideKit"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    context = _https_context()
+    with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
         return response.read()
 
 
@@ -3022,6 +3068,66 @@ def apply_update_now() -> dict:
     return {"ok": True, "version": _version_of(candidate), "port": _server_port}
 
 
+# Папка для того, что программа доносит себе сама. Внутрь /Applications без
+# пароля администратора не записать, поэтому - рядом с данными пользователя.
+USER_BIN_DIR = LOCK_DIR / "bin"
+LEGACY_NAME = "ipatool-legacy.exe" if IS_WINDOWS else "ipatool-legacy"
+
+
+def legacy_ipatool() -> Path | None:
+    """Запасной ipatool 2.2.0. Он ходит к Apple по постоянному адресу, и
+    выручает, когда свежий получает от Apple 404 при вводе кода."""
+    for folder in (USER_BIN_DIR, BIN_DIR):
+        candidate = folder / LEGACY_NAME
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def ensure_legacy_ipatool() -> Path | None:
+    """Если запасного рядом нет - скачивает его сам. Так починка доезжает
+    обычным обновлением, которое возит только два файла программы."""
+    existing = legacy_ipatool()
+    if existing:
+        return existing
+    system = "windows" if IS_WINDOWS else "macos"
+    arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "amd64"
+    url = ("https://github.com/majd/ipatool/releases/download/v2.2.0/"
+           f"ipatool-2.2.0-{system}-{arch}.tar.gz")
+    try:
+        import io, tarfile
+        data = _fetch(url, timeout=120)
+        USER_BIN_DIR.mkdir(parents=True, exist_ok=True)
+        target = USER_BIN_DIR / LEGACY_NAME
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+            member = next((m for m in archive.getmembers()
+                           if m.isfile() and "ipatool" in Path(m.name).name), None)
+            if member is None:
+                return None
+            source = archive.extractfile(member)
+            if source is None:
+                return None
+            target.write_bytes(source.read())
+        if not IS_WINDOWS:
+            os.chmod(target, 0o755)
+        return target
+    except Exception as e:
+        remember_error("докачка запасного ipatool", str(e))
+        return None
+
+
+_recent_errors: list = []
+
+
+def remember_error(where: str, text: str) -> None:
+    """Запоминает последние неудачи для отчёта. Пароль сюда не попадает:
+    записывается только то, что ответила Apple или система."""
+    if not text:
+        return
+    _recent_errors.append(time.strftime("%H:%M:%S") + " · " + where + " · " + text.strip()[:1500])
+    del _recent_errors[:-15]
+
+
 def update_note() -> dict:
     """Есть ли рядом версия свежее той, что работает сейчас. Считается по
     файлам, а не по памяти: обновление могло скачаться в прошлый запуск."""
@@ -3066,6 +3172,11 @@ def build_report() -> dict:
         lines.append("библиотека pymobiledevice3: на месте")
     except Exception as e:
         lines.append("библиотека pymobiledevice3: НЕТ (" + str(e) + ")")
+
+    if _recent_errors:
+        lines += ["", "--- последние неудачи в этом запуске ---"] + _recent_errors
+    else:
+        lines += ["", "(в этом запуске ошибок не записано)"]
 
     for log in (Path.home() / "Library" / "Logs" / "SideKit.log", LOCK_DIR / "server.log"):
         try:

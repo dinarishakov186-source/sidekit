@@ -29,6 +29,7 @@ from __future__ import annotations
 import ctypes
 import difflib
 import json
+import locale
 import os
 import platform
 import re
@@ -102,7 +103,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-08-06.62-setup"
+SERVER_VERSION = "2026-08-06.63-report"
 
 
 # ---------------------------------------------------------------------------
@@ -3302,58 +3303,158 @@ def active_index_html() -> Path:
     return updated if updated.exists() else INDEX_HTML
 
 
-def build_report() -> dict:
-    """Собирает всё нужное для разбора неполадки в один файл на Рабочем столе:
-    версии, что видно на компьютере и последние строки журнала."""
-    lines = [
-        "Отчёт SideKit",
-        "Время: " + time.strftime("%Y-%m-%d %H:%M:%S"),
-        "Версия движка: " + SERVER_VERSION,
-        "Работает версия: " + running_version(),
-        "Система: " + platform.platform(),
-        "Python: " + sys.version.split()[0] + " (" + PYTHON_EXE + ")",
-        "",
-    ]
-    try:
-        lines.append("Устройства: " + json.dumps(list_devices(), ensure_ascii=False)[:2000])
-    except Exception as e:
-        lines.append("Устройства: не удалось получить (" + str(e) + ")")
-    for name in ("ipatool", "zsign"):
-        lines.append(name + ": " + ("на месте" if find_tool(name) else "НЕ НАЙДЕН"))
-    try:
-        import pymobiledevice3        # noqa: F401
-        lines.append("библиотека pymobiledevice3: на месте")
-    except Exception as e:
-        lines.append("библиотека pymobiledevice3: НЕТ (" + str(e) + ")")
+def _human_size(num: float) -> str:
+    for unit in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
+        if num < 1024 or unit == "ТБ":
+            return f"{num:.1f} {unit}"
+        num /= 1024
+    return str(num)
 
-    lines.append("")
-    lines.append("Какие Python есть на компьютере:")
+
+def _tool_version(path) -> str:
+    try:
+        out = subprocess.run([str(path), "--version"], capture_output=True,
+                             text=True, timeout=20, **NO_CONSOLE)
+        return (out.stdout or out.stderr or "").strip().splitlines()[0][:80]
+    except Exception as e:
+        return "не отвечает (" + str(e)[:60] + ")"
+
+
+def _reachable(url: str) -> str:
+    """Достаём ли мы нужные сайты. Без этого невозможно отличить «программа
+    сломалась» от «интернет до этого адреса не доходит»."""
+    try:
+        started = time.time()
+        _fetch(url, timeout=12)
+        return "доступен (" + str(int((time.time() - started) * 1000)) + " мс)"
+    except Exception as e:
+        return "НЕДОСТУПЕН — " + str(e)[:120]
+
+
+def build_report() -> dict:
+    """Собирает подробную картину компьютера в один файл на Рабочем столе.
+    Пароли и содержимое приложений сюда не попадают - только то, что нужно,
+    чтобы понять причину неполадки, не переспрашивая по десять раз."""
+    L = ["Отчёт SideKit", "Время: " + time.strftime("%Y-%m-%d %H:%M:%S"), ""]
+
+    L.append("== ПРОГРАММА ==")
+    L.append("Версия движка: " + SERVER_VERSION)
+    L.append("Работает версия: " + running_version())
+    note = update_note()
+    L.append("Скачанное обновление: " + (note.get("version") if note else "нет"))
+    L.append("Папка программы: " + str(RESOURCES_DIR))
+    L.append("Папка данных: " + str(LOCK_DIR))
+    L.append("Интерфейс: " + str(active_index_html()))
+    L.append("Адрес обновлений: " + update_base_url())
+
+    L += ["", "== КОМПЬЮТЕР =="]
+    L.append("Система: " + platform.platform())
+    L.append("Разрядность и процессор: " + platform.machine() + " · " + (platform.processor() or "—"))
+    try:
+        L.append("Ядер: " + str(os.cpu_count()))
+    except Exception:
+        pass
+    try:
+        usage = shutil.disk_usage(str(Path.home()))
+        L.append("Диск: свободно " + _human_size(usage.free) + " из " + _human_size(usage.total))
+    except Exception:
+        pass
+    try:
+        if IS_MAC:
+            memory = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True,
+                                    text=True, timeout=10).stdout.strip()
+            if memory.isdigit():
+                L.append("Оперативная память: " + _human_size(int(memory)))
+            model = subprocess.run(["sysctl", "-n", "hw.model"], capture_output=True,
+                                   text=True, timeout=10).stdout.strip()
+            if model:
+                L.append("Модель Мака: " + model)
+        elif IS_WINDOWS:
+            class MemoryStatus(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+            info = MemoryStatus()
+            info.dwLength = ctypes.sizeof(MemoryStatus)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(info)):
+                L.append("Оперативная память: " + _human_size(info.ullTotalPhys)
+                         + " (свободно " + _human_size(info.ullAvailPhys) + ")")
+    except Exception:
+        pass
+    L.append("Имя пользователя в системе: " + (os.environ.get("USER") or os.environ.get("USERNAME") or "—"))
+    L.append("Язык и кодировка: " + str(locale.getdefaultlocale()) + " · " + sys.getfilesystemencoding())
+
+    L += ["", "== PYTHON =="]
+    L.append("Сейчас работает на: " + sys.version.split()[0] + " (" + sys.executable + ")")
+    try:
+        pip_version = subprocess.run([sys.executable, "-m", "pip", "--version"],
+                                     capture_output=True, text=True, timeout=30, **NO_CONSOLE)
+        L.append("pip: " + (pip_version.stdout or pip_version.stderr).strip()[:120])
+    except Exception as e:
+        L.append("pip: не отвечает (" + str(e)[:60] + ")")
+    L.append("Все Python на компьютере:")
     for exe in python_candidates():
         version = ".".join(str(x) for x in interpreter_version(exe))
-        lines.append("  " + exe + " — " + version
-                     + (" · библиотека есть" if interpreter_has_library(exe) else " · библиотеки нет"))
+        L.append("  " + exe + " — " + version
+                 + (" · библиотека есть" if interpreter_has_library(exe) else " · библиотеки нет"))
 
-    if _recent_errors:
-        lines += ["", "--- последние неудачи в этом запуске ---"] + _recent_errors
-    else:
-        lines += ["", "(в этом запуске ошибок не записано)"]
+    L += ["", "== СОСТАВНЫЕ ЧАСТИ =="]
+    main_tool = find_tool("ipatool")
+    L.append("ipatool: " + (str(main_tool) + " · " + _tool_version(main_tool) if main_tool else "НЕ НАЙДЕН"))
+    spare = legacy_ipatool()
+    L.append("запасной ipatool: " + (str(spare) + " · " + _tool_version(spare) if spare else "нет (докачается при нужде)"))
+    L.append("zsign: " + (str(find_tool("zsign")) if find_tool("zsign") else "нет (для App Store не нужен)"))
+    try:
+        import pymobiledevice3
+        version = getattr(pymobiledevice3, "__version__", "версия неизвестна")
+        L.append("библиотека pymobiledevice3: есть, " + str(version))
+    except Exception as e:
+        L.append("библиотека pymobiledevice3: НЕТ (" + str(e) + ")")
+
+    L += ["", "== СВЯЗЬ =="]
+    L.append("GitHub (обновления): " + _reachable(update_base_url() + "version.json"))
+    L.append("Apple (вход и скачивание): " + _reachable("https://itunes.apple.com/lookup?id=284882215"))
+
+    L += ["", "== ТЕЛЕФОН =="]
+    try:
+        L.append("Устройства: " + json.dumps(list_devices(), ensure_ascii=False)[:1500])
+    except Exception as e:
+        L.append("Устройства: не удалось получить (" + str(e) + ")")
+    if IS_WINDOWS:
+        try:
+            service = subprocess.run(["sc", "query", "Apple Mobile Device Service"],
+                                     capture_output=True, text=True, timeout=20, **NO_CONSOLE)
+            state = "РАБОТАЕТ" if "RUNNING" in service.stdout.upper() else "не работает"
+            L.append("Драйвер Apple (служба): " + (state if service.returncode == 0 else "НЕ УСТАНОВЛЕН"))
+        except Exception as e:
+            L.append("Драйвер Apple: не удалось проверить (" + str(e)[:60] + ")")
+    try:
+        L.append("Приложений в памяти программы: " + str(len(load_known_apps() or {})))
+    except Exception:
+        pass
+    state = _read_login_state()
+    L.append("Вход в Apple ID: " + ("выполнен, " + str(state.get("email")) if state.get("logged_in") else "не выполнен"))
+
+    L += ["", "== ПОСЛЕДНИЕ НЕУДАЧИ =="]
+    L += _recent_errors or ["(в этом запуске ошибок не записано)"]
 
     for log in (Path.home() / "Library" / "Logs" / "SideKit.log", LOCK_DIR / "server.log"):
         try:
             if log.exists():
                 tail = log.read_text(encoding="utf-8", errors="replace").splitlines()[-200:]
-                lines += ["", "--- " + str(log) + " (последние строки) ---"] + tail
+                L += ["", "--- " + str(log) + " (последние строки) ---"] + tail
         except Exception:
             pass
 
     target = desktop_dir() / ("Отчёт SideKit " + time.strftime("%Y-%m-%d %H-%M") + ".txt")
     try:
-        target.write_text("\n".join(lines), encoding="utf-8")
+        target.write_text("\n".join(L), encoding="utf-8")
     except Exception as e:
         return {"ok": False, "error": "Не получилось сохранить отчёт: " + str(e)}
     reveal_in_finder(str(target))
     return {"ok": True, "path": str(target)}
-
 
 def main():
     # SideKit now ships its own native window (Contents/MacOS/SideKitUI),
@@ -3370,7 +3471,14 @@ def main():
     switch_python_if_needed()
     native_ui = os.environ.get("SIDEKIT_NATIVE_UI") == "1"
     seed_known_apps()
-    threading.Thread(target=check_for_updates, daemon=True).start()
+    def watch_updates():
+        # Проверяем и при запуске, и раз в полчаса: программу держат открытой
+        # днями, и ждать перезапуска ради обновления незачем.
+        while True:
+            check_for_updates()
+            time.sleep(1800)
+
+    threading.Thread(target=watch_updates, daemon=True).start()
 
     existing_url = find_existing_instance_url()
     if existing_url and (UPDATE_DIR / "server.py").exists() \

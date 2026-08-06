@@ -102,7 +102,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-08-06.60-certs"
+SERVER_VERSION = "2026-08-06.61-python"
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +266,79 @@ def pmd3(*args: str, timeout: int | None = 120) -> tuple[int, str, str]:
 # first-run setup (pip install pymobiledevice3, download ipatool/zsign)
 # ---------------------------------------------------------------------------
 
+def python_candidates() -> list:
+    """Все питоны, какие есть на этом Маке, от самого подходящего к запасным.
+    На старых системах /usr/bin/python3 - это Python 3.8 из инструментов Xcode:
+    он запускается, но библиотека для iPhone под него уже не выпускается, да и
+    pip там настолько старый, что не умеет читать современные пакеты."""
+    if IS_WINDOWS:
+        return [PYTHON_EXE]
+    found = []
+    versions = sorted(Path("/Library/Frameworks/Python.framework/Versions").glob("3.*"),
+                      key=lambda x: [int(n) for n in x.name.split(".") if n.isdigit()],
+                      reverse=True)
+    for folder in versions:
+        exe = folder / "bin" / "python3"
+        if exe.exists():
+            found.append(str(exe))
+    for extra in ("/opt/homebrew/bin/python3", "/usr/local/bin/python3",
+                  sys.executable, "/usr/bin/python3"):
+        if extra and extra not in found and Path(extra).exists():
+            found.append(extra)
+    return found
+
+
+def interpreter_version(exe: str) -> tuple:
+    try:
+        out = subprocess.run([exe, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
+                             capture_output=True, text=True, timeout=20, **NO_CONSOLE).stdout.strip()
+        return tuple(int(x) for x in out.split("."))
+    except Exception:
+        return (0, 0)
+
+
+def interpreter_has_library(exe: str) -> bool:
+    try:
+        return subprocess.run([exe, "-c", "import pymobiledevice3"],
+                              capture_output=True, timeout=40, **NO_CONSOLE).returncode == 0
+    except Exception:
+        return False
+
+
+def python_with_library() -> str | None:
+    """Питон, у которого библиотека для iPhone уже стоит."""
+    for exe in python_candidates():
+        if interpreter_has_library(exe):
+            return exe
+    return None
+
+
+def switch_python_if_needed() -> None:
+    """Программу запускает короткий скрипт внутри приложения, и он может
+    выбрать не тот питон - например Python 3.8 из инструментов Xcode. Если
+    у него нет библиотеки, а у соседнего есть, перезапускаемся на соседнем."""
+    if IS_WINDOWS or os.environ.get("SIDEKIT_PYSWITCH") == "1":
+        return
+    if has_pymobiledevice3():
+        return
+    better = python_with_library()
+    if not better or Path(better).resolve() == Path(sys.executable).resolve():
+        return
+    os.environ["SIDEKIT_PYSWITCH"] = "1"
+    try:
+        os.execv(better, [better, os.path.abspath(__file__)] + sys.argv[1:])
+    except Exception:
+        pass
+
+
+def python_for_install() -> str:
+    """Куда ставить библиотеку: нужен Python 3.9 и новее."""
+    for exe in python_candidates():
+        if interpreter_version(exe) >= (3, 9):
+            return exe
+    return sys.executable
+
+
 def pip_install_pymobiledevice3(log: list) -> bool:
     log.append("Устанавливаю pymobiledevice3...")
     # --force-reinstall --no-cache-dir matters here: if a previous install
@@ -273,16 +346,29 @@ def pip_install_pymobiledevice3(log: list) -> bool:
     # installed once under Rosetta, run another time natively), a plain
     # --upgrade can think the "same version" is already satisfied and skip
     # reinstalling it, leaving the broken files in place.
+    target = python_for_install()
+    if Path(target).resolve() != Path(sys.executable).resolve():
+        log.append("Ставлю в подходящий Python: " + target)
+
+    # Старый pip не умеет читать современные пакеты и падает на pyproject.toml -
+    # именно это происходит на Python 3.8 из инструментов Xcode.
+    log.append("Обновляю сам pip...")
+    run([target, "-m", "pip", "install", "--user", "--upgrade",
+         "pip", "setuptools", "wheel"], timeout=300)
+
     cmd = [
-        sys.executable, "-m", "pip", "install", "--user",
+        target, "-m", "pip", "install", "--user",
         "--upgrade", "--force-reinstall", "--no-cache-dir", "pymobiledevice3",
     ]
-    rc, out, err = run(cmd, timeout=300)
+    rc, out, err = run(cmd, timeout=600)
     if rc != 0 and "externally-managed-environment" in err:
         log.append("Повторяю установку с --break-system-packages...")
         rc, out, err = run(cmd + ["--break-system-packages"], timeout=300)
     if rc == 0:
         log.append("pymobiledevice3 установлен.")
+        if Path(target).resolve() != Path(sys.executable).resolve():
+            log.append("Перезапускаю программу на этом Python...")
+            restart_with_python(target)
         return True
     log.append(f"Не удалось установить pymobiledevice3: {err.strip()[-800:]}")
     return False
@@ -3041,6 +3127,28 @@ _server = None
 _server_port = 0
 
 
+def restart_with_python(exe: str) -> None:
+    """Перезапускает движок другим питоном на том же порту - окно остаётся
+    открытым и просто перезагружает страницу."""
+    def restart():
+        time.sleep(0.8)
+        try:
+            if _server is not None:
+                _server.server_close()
+        except Exception:
+            pass
+        os.environ["SIDEKIT_PYSWITCH"] = "1"
+        os.environ["SIDEKIT_HOME"] = str(RESOURCES_DIR)
+        args = [exe, os.path.abspath(__file__), "--port", str(_server_port)]
+        try:
+            os.execv(exe, args)
+        except Exception:
+            subprocess.Popen(args, **NO_CONSOLE)
+            os._exit(0)
+
+    threading.Thread(target=restart, daemon=True).start()
+
+
 def apply_update_now() -> dict:
     """Перезапускает движок на скачанной версии, не закрывая окно: новый
     занимает тот же порт, поэтому страница просто перезагружается."""
@@ -3173,6 +3281,13 @@ def build_report() -> dict:
     except Exception as e:
         lines.append("библиотека pymobiledevice3: НЕТ (" + str(e) + ")")
 
+    lines.append("")
+    lines.append("Какие Python есть на компьютере:")
+    for exe in python_candidates():
+        version = ".".join(str(x) for x in interpreter_version(exe))
+        lines.append("  " + exe + " — " + version
+                     + (" · библиотека есть" if interpreter_has_library(exe) else " · библиотеки нет"))
+
     if _recent_errors:
         lines += ["", "--- последние неудачи в этом запуске ---"] + _recent_errors
     else:
@@ -3207,6 +3322,7 @@ def main():
         return
 
     adopt_update_if_ready()
+    switch_python_if_needed()
     native_ui = os.environ.get("SIDEKIT_NATIVE_UI") == "1"
     seed_known_apps()
     threading.Thread(target=check_for_updates, daemon=True).start()

@@ -316,6 +316,7 @@
 
     <!-- В самом низу и отдельно от кнопок устройств: жать её нужно редко,
          а попасть по ней случайно - неприятно. -->
+    <button class="sidebar-btn report-btn" onclick="runDiagnose(this)">🔌 Проверить телефон</button>
     <button class="sidebar-btn report-btn" onclick="sendReport(this)">🧾 Сообщить об ошибке</button>
   </div>
 
@@ -527,6 +528,47 @@ async function runSetup() {
       + "повторная попытка часто помогает.");
   }
   btn.disabled = false;
+}
+
+// Проверка по звеньям: показывает, на каком шаге цепочка обрывается, вместо
+// общего «телефон не виден».
+async function runDiagnose(btn) {
+  const msg = document.getElementById("mainMsg");
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Проверяю…";
+  try {
+    await api("POST", "/api/diagnose", { udid: activeUdid });
+    let state = {};
+    for (let i = 0; i < 60; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      state = await api("GET", "/api/diagnose-progress");
+      if (state.done) break;
+    }
+    const steps = state.steps || [];
+    if (!steps.length) {
+      showMsg(msg, "Проверка не ответила — попробуй ещё раз.", "err");
+    } else {
+      showMsg(msg, state.first_problem
+        ? "Цепочка обрывается на шаге: " + state.first_problem
+        : "Вся цепочка до телефона в порядке.", state.first_problem ? "err" : "ok");
+      const list = document.createElement("div");
+      list.style.marginTop = "8px";
+      steps.forEach(step => {
+        const row = document.createElement("div");
+        row.style.fontSize = "12px";
+        row.style.padding = "2px 0";
+        row.textContent = (step.ok ? "✓ " : "✗ ") + step.name + " — " + step.detail;
+        if (!step.ok) row.style.color = "#c0392b";
+        list.appendChild(row);
+      });
+      msg.appendChild(list);
+    }
+  } catch (e) {
+    showMsg(msg, "Ошибка: " + e, "err");
+  }
+  btn.disabled = false;
+  btn.textContent = original;
 }
 
 async function sendReport(btn) {

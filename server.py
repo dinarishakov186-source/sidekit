@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import ctypes
 import difflib
+import hashlib
 import json
 import locale
 import os
@@ -103,7 +104,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-08-07.65-report-bg"
+SERVER_VERSION = "2026-08-07.66-hardening"
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +341,61 @@ def python_for_install() -> str:
     return sys.executable
 
 
+# Библиотека для работы с iPhone закреплена на конкретной проверенной версии.
+# Источник - официальный PyPI (https://pypi.org/project/pymobiledevice3/10.3.1/),
+# отпечаток взят оттуда же. Именно на ней проверена работа с iOS 26.3.1.
+PMD3_VERSION = "10.3.1"
+PMD3_WHEEL = "pymobiledevice3-10.3.1-py3-none-any.whl"
+PMD3_SHA256 = "c087212ba0e3e9be431d069969658df1b86b45b8d0ea262835ce9e23aa4436fc"
+PMD3_URL = ("https://files.pythonhosted.org/packages/3a/81/"
+            "8677fbceb774eca9978519fdd1048202f2d5a71649490bf98f0e1a0b851e/"
+            + PMD3_WHEEL)
+
+
+def download_verified_wheel(log: list) -> Path | None:
+    """Качает закреплённый файл библиотеки и сверяет отпечаток. Не совпал -
+    не ставим: это тот файл, который потом работает с телефоном."""
+    try:
+        data = _fetch(PMD3_URL, timeout=180)
+    except Exception as e:
+        log.append("Не удалось скачать проверенный файл библиотеки: " + str(e)[:120])
+        return None
+    actual = hashlib.sha256(data).hexdigest()
+    if actual != PMD3_SHA256:
+        log.append("Отпечаток файла библиотеки не совпал — установка отменена.")
+        remember_error("установка библиотеки", "SHA-256 " + actual + " вместо " + PMD3_SHA256)
+        return None
+    target = USER_BIN_DIR / PMD3_WHEEL
+    USER_BIN_DIR.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+    log.append("Файл библиотеки скачан, отпечаток совпал (" + actual[:16] + "…).")
+    return target
+
+
+def smoke_test(log: list) -> bool:
+    """Проверка после установки: библиотека должна не просто импортироваться,
+    а реально отвечать на две команды."""
+    ok = True
+    for title, args in (("usbmux list", ["usbmux", "list"]),
+                        ("apps list", ["apps", "list", "--no-color"])):
+        try:
+            result = subprocess.run([PYTHON_EXE, "-W", "ignore", "-m", "pymobiledevice3"] + args,
+                                    capture_output=True, text=True, timeout=90, **NO_CONSOLE)
+            head = (result.stdout or result.stderr or "").strip().replace("\n", " ")[:160]
+            if result.returncode == 0:
+                log.append("проверка «" + title + "»: отвечает · " + (head or "пусто"))
+            else:
+                # Без подключённого телефона «apps list» законно не отвечает -
+                # это не поломка установки.
+                log.append("проверка «" + title + "»: код " + str(result.returncode) + " · " + head)
+                if title == "usbmux list":
+                    ok = False
+        except Exception as e:
+            log.append("проверка «" + title + "»: не выполнилась (" + str(e)[:100] + ")")
+            ok = False
+    return ok
+
+
 def pip_install_pymobiledevice3(log: list) -> bool:
     log.append("Устанавливаю pymobiledevice3...")
     # --force-reinstall --no-cache-dir matters here: if a previous install
@@ -357,16 +413,21 @@ def pip_install_pymobiledevice3(log: list) -> bool:
     run([target, "-m", "pip", "install", "--user", "--upgrade",
          "pip", "setuptools", "wheel"], timeout=300)
 
+    wheel = download_verified_wheel(log)
+    package = str(wheel) if wheel else "pymobiledevice3==" + PMD3_VERSION
+    if not wheel:
+        log.append("Ставлю закреплённую версию " + PMD3_VERSION + " обычным способом.")
     cmd = [
         target, "-m", "pip", "install", "--user",
-        "--upgrade", "--force-reinstall", "--no-cache-dir", "pymobiledevice3",
+        "--upgrade", "--force-reinstall", "--no-cache-dir", package,
     ]
-    rc, out, err = run(cmd, timeout=600)
+    rc, out, err = run(cmd, timeout=900)
     if rc != 0 and "externally-managed-environment" in err:
         log.append("Повторяю установку с --break-system-packages...")
         rc, out, err = run(cmd + ["--break-system-packages"], timeout=300)
     if rc == 0:
-        log.append("pymobiledevice3 установлен.")
+        log.append("pymobiledevice3 " + PMD3_VERSION + " установлен.")
+        smoke_test(log)
         if Path(target).resolve() != Path(sys.executable).resolve():
             log.append("Перезапускаю программу на этом Python...")
             restart_with_python(target)
@@ -1308,13 +1369,13 @@ asyncio.run(main())
 
 
 def _run_device_script(script: str, udid: str | None, stdin_payload: str | None = None,
-                       timeout: int = 180):
+                       timeout: int = 180, extra_args: list | None = None):
     """Runs one of the pymobiledevice3 helper scripts and returns its parsed
     JSON output, or None. The device libraries are async and noisy on
     shutdown, so they live in a subprocess rather than in this server."""
     try:
         result = subprocess.run(
-            [PYTHON_EXE, "-W", "ignore", "-c", script, udid or ""],
+            [PYTHON_EXE, "-W", "ignore", "-c", script, udid or ""] + (extra_args or []),
             input=stdin_payload, text=True, capture_output=True, timeout=timeout, **NO_CONSOLE)
     except Exception:
         return None
@@ -2303,6 +2364,61 @@ def cancel_install() -> dict:
     return {"ok": True}
 
 
+_VERIFY_INSTALL_SCRIPT = """
+import json, sys
+from pymobiledevice3.lockdown import create_using_usbmux
+from pymobiledevice3.services.installation_proxy import InstallationProxyService
+
+udid = sys.argv[1] or None
+bundle_id = sys.argv[2]
+lockdown = create_using_usbmux(serial=udid)
+proxy = InstallationProxyService(lockdown)
+# Спрашиваем ровно про одно приложение и только нужные поля: полный обход
+# каталога на больших телефонах долгий и незачем.
+found = proxy.lookup(options={
+    "BundleIDs": [bundle_id],
+    "ReturnAttributes": ["CFBundleIdentifier", "CFBundleShortVersionString", "CFBundleVersion"],
+})
+info = (found or {}).get(bundle_id)
+print(json.dumps({"installed": bool(info), "info": info or {}}, ensure_ascii=False))
+"""
+
+
+def bundle_id_of_ipa(ipa_path: str) -> str | None:
+    """Достаёт идентификатор приложения прямо из файла .ipa."""
+    try:
+        import plistlib, zipfile
+        with zipfile.ZipFile(ipa_path) as archive:
+            name = next((n for n in archive.namelist()
+                         if n.count("/") == 3 and n.endswith(".app/Info.plist")
+                         and n.startswith("Payload/")), None)
+            if not name:
+                name = next((n for n in archive.namelist()
+                             if n.startswith("Payload/") and n.endswith(".app/Info.plist")), None)
+            if not name:
+                return None
+            return plistlib.loads(archive.read(name)).get("CFBundleIdentifier")
+    except Exception:
+        return None
+
+
+def confirm_installed_on_phone(ipa_path: str, udid: str | None) -> tuple:
+    """Спрашивает у самого телефона, появилось ли приложение. Пока телефон не
+    подтвердил, писать «установлено» нельзя: команда может завершиться без
+    ошибки, а приложение так и не появиться."""
+    bundle_id = bundle_id_of_ipa(ipa_path)
+    if not bundle_id:
+        return True, "не удалось прочитать идентификатор из файла — пропускаю сверку"
+    for attempt in range(6):                 # телефону нужно немного времени
+        answer = _run_device_script(_VERIFY_INSTALL_SCRIPT, udid, timeout=90,
+                                    extra_args=[bundle_id])
+        if answer and answer.get("installed"):
+            version = (answer.get("info") or {}).get("CFBundleShortVersionString", "")
+            return True, bundle_id + (" " + str(version) if version else "")
+        time.sleep(2)
+    return False, bundle_id
+
+
 def _run_install_job(ipa_path: str, udid: str | None) -> None:
     global _install_proc, _install_cancelled
     args = [PYTHON_EXE, "-W", "ignore", "-m", "pymobiledevice3", "apps", "install", ipa_path]
@@ -2370,6 +2486,15 @@ def _run_install_job(ipa_path: str, udid: str | None) -> None:
     else:
         status = "done" if ok else "error"
         error = None if ok else (_clean_python_traceback(raw) or _extract_error_text(raw))
+        if ok:
+            confirmed, detail = confirm_installed_on_phone(ipa_path, udid)
+            if not confirmed:
+                status = "error"
+                error = ("Команда установки завершилась, но телефон не подтвердил, "
+                         "что приложение появилось (" + detail + ").\n\n"
+                         "Проверь на телефоне: если значка нет, разблокируй его "
+                         "и попробуй ещё раз.")
+                remember_error("установка на iPhone", "нет подтверждения от телефона: " + detail)
 
     with _install_lock:
         _install_state.update({
@@ -2816,6 +2941,8 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self.send_response(204)
                     self.end_headers()
+            elif path == "/api/diagnose-progress":
+                self._send_json(dict(_diagnose_job))
             elif path == "/api/report-progress":
                 self._send_json(report_state())
             elif path == "/api/setup-progress":
@@ -2924,6 +3051,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(apply_update_now())
             elif path == "/api/report":
                 self._send_json(start_report())
+            elif path == "/api/diagnose":
+                self._send_json(start_diagnose(body.get("udid")))
             elif path == "/api/pick-ipa-files":
                 self._send_json(pick_ipa_files())
             elif path == "/api/pick-save-path":
@@ -3150,10 +3279,24 @@ def check_for_updates() -> None:
         staging = LOCK_DIR / "update.tmp"
         shutil.rmtree(staging, ignore_errors=True)
         staging.mkdir(parents=True, exist_ok=True)
+        # Отпечатки файлов лежат в том же version.json. Скачанный server.py
+        # потом запускается, поэтому без совпадения отпечатка обновление не
+        # принимается вовсе.
+        digests = info.get("sha256") or {}
         for name in ("server.py", "index.html"):
             data = _fetch(base + name)
             if len(data) < 1000:
                 return              # подозрительно мало - не берём
+            expected = str(digests.get(name, "")).lower().strip()
+            actual = hashlib.sha256(data).hexdigest()
+            if not expected:
+                remember_error("обновление", "в version.json нет отпечатка для "
+                               + name + " — обновление не принято")
+                return
+            if expected != actual:
+                remember_error("обновление", "отпечаток " + name + " не совпал: ждали "
+                               + expected[:16] + "…, получили " + actual[:16] + "…")
+                return
             (staging / name).write_bytes(data)
         (staging / "version.json").write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
 
@@ -3333,7 +3476,143 @@ def _reachable(url: str) -> str:
         return "НЕДОСТУПЕН — " + str(e)[:120]
 
 
+_DIAGNOSE_SCRIPT = """
+import json, sys
+out = {}
+try:
+    # В свежих версиях библиотеки перечисление устройств асинхронное,
+    # поэтому его нужно прогонять через цикл событий, а не звать напрямую.
+    import asyncio, inspect
+    from pymobiledevice3.usbmux import list_devices
+    devices = list_devices()
+    if inspect.iscoroutine(devices):
+        devices = asyncio.run(devices)
+    devices = list(devices)
+    out["usbmux"] = {"ok": True, "count": len(devices),
+                     "serials": [getattr(d, "serial", "?") for d in devices][:5]}
+except Exception as e:
+    out["usbmux"] = {"ok": False, "error": type(e).__name__ + ": " + str(e)[:180]}
+
+serial = sys.argv[1] or None
+if not serial and out.get("usbmux", {}).get("serials"):
+    serial = out["usbmux"]["serials"][0]
+
+if serial:
+    try:
+        from pymobiledevice3.lockdown import create_using_usbmux
+        lockdown = create_using_usbmux(serial=serial)
+        out["trust"] = {"ok": True}
+        out["ios"] = {"ok": True, "version": lockdown.product_version,
+                      "model": lockdown.product_type,
+                      "name": lockdown.short_info.get("DeviceName", "")}
+        try:
+            from pymobiledevice3.services.installation_proxy import InstallationProxyService
+            proxy = InstallationProxyService(lockdown)
+            # calculate_sizes=False принципиально: подсчёт размеров на телефоне
+            # с сотнями приложений может тянуться минутами.
+            apps = proxy.get_apps(application_type="User", calculate_sizes=False)
+            out["installation_proxy"] = {"ok": True, "count": len(apps)}
+        except Exception as e:
+            out["installation_proxy"] = {"ok": False, "error": str(e)[:200]}
+    except Exception as e:
+        message = str(e)[:200]
+        paired = "pair" not in message.lower() and "trust" not in message.lower()
+        out["trust"] = {"ok": False, "error": message, "needs_trust": not paired}
+        out["ios"] = {"ok": False, "error": "не дошли до этого шага"}
+        out["installation_proxy"] = {"ok": False, "error": "не дошли до этого шага"}
+else:
+    for key in ("trust", "ios", "installation_proxy"):
+        out[key] = {"ok": False, "error": "телефон не найден"}
+print(json.dumps(out, ensure_ascii=False))
+"""
+
+
+def diagnose(udid: str | None = None) -> dict:
+    """Проверка цепочки по звеньям: драйвер → usbmux → доверие → версия iOS →
+    список приложений → ipatool. Показывает, на каком именно шаге обрыв."""
+    steps = []
+
+    def add(name, ok, detail):
+        steps.append({"name": name, "ok": bool(ok), "detail": str(detail)[:400]})
+
+    # 1. драйвер Apple
+    if IS_WINDOWS:
+        try:
+            service = subprocess.run(["sc", "query", "Apple Mobile Device Service"],
+                                     capture_output=True, text=True, timeout=25, **NO_CONSOLE)
+            running = "RUNNING" in (service.stdout or "").upper()
+            add("Драйвер Apple", running,
+                "служба работает" if running else
+                ("служба есть, но остановлена" if service.returncode == 0
+                 else "НЕ УСТАНОВЛЕН — поставь Apple Devices из Microsoft Store"))
+        except Exception as e:
+            add("Драйвер Apple", False, "не удалось проверить: " + str(e)[:120])
+    else:
+        socket_exists = Path("/var/run/usbmuxd").exists()
+        add("Драйвер Apple", True,
+            "в macOS встроен" + ("" if socket_exists else " (сокет usbmuxd не найден, но это норма до подключения)"))
+
+    # 2-5. то, что можно узнать только у самого телефона
+    answer = _run_device_script(_DIAGNOSE_SCRIPT, udid, timeout=120) or {}
+    usbmux = answer.get("usbmux") or {}
+    add("usbmux (видит ли компьютер телефон)", usbmux.get("ok") and usbmux.get("count"),
+        ("найдено устройств: " + str(usbmux.get("count"))) if usbmux.get("ok") and usbmux.get("count")
+        else ("телефон не подключён или кабель только для зарядки" if usbmux.get("ok")
+              else usbmux.get("error", "библиотека не ответила")))
+
+    trust = answer.get("trust") or {}
+    add("Доверие телефона", trust.get("ok"),
+        "подтверждено" if trust.get("ok")
+        else (trust.get("error", "нет данных")
+              + (" — разблокируй телефон и нажми «Доверять»" if trust.get("needs_trust") else "")))
+
+    ios = answer.get("ios") or {}
+    add("Версия iOS", ios.get("ok"),
+        (str(ios.get("name", "")) + " · iOS " + str(ios.get("version", "")) + " · " + str(ios.get("model", "")))
+        if ios.get("ok") else ios.get("error", "нет данных"))
+
+    proxy = answer.get("installation_proxy") or {}
+    add("Список приложений (installation_proxy)", proxy.get("ok"),
+        ("приложений: " + str(proxy.get("count"))) if proxy.get("ok")
+        else proxy.get("error", "нет данных"))
+
+    # 6. ipatool
+    tool = find_tool("ipatool")
+    if tool:
+        version = _tool_version(tool)
+        auth = ipatool_auth_status()
+        add("ipatool", True, version + " · вход: "
+            + ("выполнен " + str(auth.get("email", "")) if auth.get("logged_in") else "не выполнен"))
+    else:
+        add("ipatool", False, "не найден")
+
+    broken = next((x["name"] for x in steps if not x["ok"]), None)
+    return {"ok": True, "steps": steps, "first_problem": broken}
+
+
 _report_job: dict = {"running": False, "done": False}
+
+
+_diagnose_job: dict = {"running": False, "done": False}
+
+
+def start_diagnose(udid: str | None) -> dict:
+    if _diagnose_job.get("running"):
+        return {"ok": True, "started": True, "already": True}
+    _diagnose_job.update({"running": True, "done": False, "steps": [], "first_problem": None})
+
+    def work():
+        try:
+            result = diagnose(udid)
+        except Exception as e:
+            result = {"steps": [{"name": "Проверка", "ok": False, "detail": str(e)}],
+                      "first_problem": "Проверка"}
+        _diagnose_job.update({"running": False, "done": True,
+                              "steps": result.get("steps", []),
+                              "first_problem": result.get("first_problem")})
+
+    threading.Thread(target=work, daemon=True).start()
+    return {"ok": True, "started": True}
 
 
 def start_report() -> dict:
@@ -3467,6 +3746,13 @@ def build_report() -> dict:
     state = _read_login_state()
     L.append("Вход в Apple ID: " + ("выполнен, " + str(state.get("email")) if state.get("logged_in") else "не выполнен"))
 
+    L += ["", "== ЦЕПОЧКА ДО ТЕЛЕФОНА =="]
+    try:
+        for step in diagnose().get("steps", []):
+            L.append(("  [ок]   " if step["ok"] else "  [СБОЙ] ") + step["name"] + ": " + step["detail"])
+    except Exception as e:
+        L.append("  не удалось выполнить проверку: " + str(e)[:200])
+
     L += ["", "== ПОСЛЕДНИЕ НЕУДАЧИ =="]
     L += _recent_errors or ["(в этом запуске ошибок не записано)"]
 
@@ -3499,16 +3785,9 @@ def main():
 
     adopt_update_if_ready()
     switch_python_if_needed()
+    # До подъёма сервера остаётся только то, что решает, каким файлом и каким
+    # питоном мы работаем: обе проверки читают диск и в сеть не ходят.
     native_ui = os.environ.get("SIDEKIT_NATIVE_UI") == "1"
-    seed_known_apps()
-    def watch_updates():
-        # Проверяем и при запуске, и раз в полчаса: программу держат открытой
-        # днями, и ждать перезапуска ради обновления незачем.
-        while True:
-            check_for_updates()
-            time.sleep(1800)
-
-    threading.Thread(target=watch_updates, daemon=True).start()
 
     existing_url = find_existing_instance_url()
     if existing_url and (UPDATE_DIR / "server.py").exists() \
@@ -3541,6 +3820,19 @@ def main():
     except OSError:
         # Порт мог не успеть освободиться - берём любой свободный.
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    # Всё небыстрое - после того, как сервер уже слушает: заполнение базы
+    # приложений и проверка обновлений не должны задерживать открытие окна.
+    def background_chores():
+        try:
+            seed_known_apps()
+        except Exception:
+            pass
+        while True:
+            check_for_updates()
+            time.sleep(1800)
+
+    threading.Thread(target=background_chores, daemon=True).start()
+
     port = server.server_address[1]
     global _server, _server_port
     _server, _server_port = server, port

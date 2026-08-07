@@ -104,7 +104,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-08-07.66-hardening"
+SERVER_VERSION = "2026-08-07.67-version-line"
 
 
 # ---------------------------------------------------------------------------

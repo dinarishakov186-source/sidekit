@@ -264,6 +264,9 @@
     cursor: pointer;
   }
   .update-btn:disabled { opacity: .6; cursor: default; }
+  .version-line {
+    margin: 10px 2px 0; font-size: 10.5px; color: #8a8a8e; text-align: center;
+  }
 </style>
 </head>
 <body>
@@ -316,8 +319,10 @@
 
     <!-- В самом низу и отдельно от кнопок устройств: жать её нужно редко,
          а попасть по ней случайно - неприятно. -->
-    <button class="sidebar-btn report-btn" onclick="runDiagnose(this)">🔌 Проверить телефон</button>
+    <button class="sidebar-btn report-btn" id="diagnoseBtn" style="display:none"
+            onclick="runDiagnose(this)">🔌 Почему телефон не виден</button>
     <button class="sidebar-btn report-btn" onclick="sendReport(this)">🧾 Сообщить об ошибке</button>
+    <div class="version-line" id="versionLine"></div>
   </div>
 
   <div id="main">
@@ -605,6 +610,9 @@ async function sendReport(btn) {
 async function checkUpdateNote() {
   try {
     const st = await api("GET", "/api/status");
+    if (st.version) {
+      document.getElementById("versionLine").textContent = "версия " + st.version;
+    }
     const box = document.getElementById("updateNote");
     if (!st.update || !st.update.available) { box.classList.remove("on"); return; }
     box.classList.add("on");
@@ -940,6 +948,8 @@ async function loadDevices(attempt = 0) {
       ? "<div class='empty-hint'>Ищу iPhone…</div>"
       : "<div class='empty-hint'>Ничего не найдено на уровне USB. Подключи iPhone кабелем (не зарядным-only) и разблокируй его.</div>";
     deviceSignature = "";
+    // Телефона не видно - вот тогда и предлагаем разобраться, где обрыв.
+    document.getElementById("diagnoseBtn").style.display = attempt >= 2 ? "block" : "none";
     if (activeUdid) { activeUdid = null; renderMainHeader(); showTab(currentTab); }
     deviceScanTimer = setTimeout(() => loadDevices(attempt + 1), attempt < 6 ? 4000 : 15000);
     return;
@@ -973,6 +983,7 @@ async function loadDevices(attempt = 0) {
   // Опрос продолжается и когда телефон найден: выдернули кабель - строка
   // пропадает сама, подключили другой - список меняется сам, без кнопки.
   deviceScanTimer = setTimeout(() => loadDevices(0), 3000);
+  document.getElementById("diagnoseBtn").style.display = "none";
   if (!activeUdid && devices.length) selectDevice(devices[0].udid);
 }
 

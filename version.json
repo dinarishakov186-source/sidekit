@@ -1,8 +1,8 @@
 {
-  "version": "2026-08-07.66-hardening",
-  "notes": "быстрый старт, проверка отпечатков, диагностика по звеньям",
+  "version": "2026-08-07.67-version-line",
+  "notes": "номер версии виден в окне; кнопка проверки телефона — только когда телефон не найден",
   "sha256": {
-    "server.py": "7e6e9d31227248c1f5b27837abaff6d54849abbe7417474c25c7d1805e450d93",
-    "index.html": "a84c6b103e47333fc93d7569ec6ec48766bd6d1446d3f8822e3d0184393705c3"
+    "server.py": "b5ef9b9efc1dbcc9518bd68485f33cc2f74e88e0c6a8a2c8ce9b1f4b7045f939",
+    "index.html": "e7849ccce2f5b8f0991db450d02eab8b49c7db281335f27b4394ef8c9007c594"
   }
 }

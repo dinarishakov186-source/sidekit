@@ -535,12 +535,22 @@ async function sendReport(btn) {
   btn.disabled = true;
   btn.textContent = "Собираю…";
   try {
-    const res = await api("POST", "/api/report", {});
-    if (res.ok) {
-      showMsg(msg, "Отчёт сохранён на Рабочий стол: " + res.path.split(/[\\/]/).pop()
+    await api("POST", "/api/report", {});
+    // Сбор идёт в фоне: на Windows он занимает до полуминуты, и ждать ответа
+    // одним запросом нельзя - окно обрывает его само.
+    let state = {};
+    for (let i = 0; i < 90; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      state = await api("GET", "/api/report-progress");
+      if (state.done) break;
+    }
+    if (state.done && state.path) {
+      showMsg(msg, "Отчёт сохранён на Рабочий стол: " + state.path.split(/[\\/]/).pop()
         + ". Перешли этот файл Динару.", "ok");
+    } else if (state.done) {
+      showMsg(msg, state.error || "Не получилось собрать отчёт", "err");
     } else {
-      showMsg(msg, res.error || "Не получилось собрать отчёт", "err");
+      showMsg(msg, "Отчёт всё ещё собирается — посмотри на Рабочем столе через минуту.", "info");
     }
   } catch (e) {
     showMsg(msg, "Ошибка: " + e, "err");
@@ -760,6 +770,29 @@ async function runInstallJob(job) {
   } catch (e) {
     return { ok: false, error: String(e) };
   }
+}
+
+// Эти три отвечают за окно Apple ID: показ нужного шага, ввод кода и
+// возврат назад. Их случайно срезало при правке соседнего блока.
+function setAppleState(state, email) {
+  document.getElementById("appleCredentials").style.display = state === "credentials" ? "" : "none";
+  document.getElementById("appleTwoFactor").style.display = state === "2fa" ? "" : "none";
+  document.getElementById("appleAccount").style.display = state === "account" ? "" : "none";
+  document.getElementById("appleDot").classList.toggle("ok", state === "account");
+  if (state === "account") document.getElementById("accountEmail").textContent = email || "";
+  if (state === "2fa") setTimeout(() => document.getElementById("loginCode").focus(), 50);
+}
+
+function onCodeInput() {
+  const field = document.getElementById("loginCode");
+  field.value = field.value.replace(/\D/g, "").slice(0, 6);
+  if (field.value.length === 6) doLogin();
+}
+
+function cancelTwoFactor() {
+  document.getElementById("loginCode").value = "";
+  document.getElementById("loginMsg").style.display = "none";
+  setAppleState("credentials");
 }
 
 async function doLogin(force = false) {

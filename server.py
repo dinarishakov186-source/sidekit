@@ -103,7 +103,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-08-06.63-report"
+SERVER_VERSION = "2026-08-07.65-report-bg"
 
 
 # ---------------------------------------------------------------------------
@@ -2816,6 +2816,8 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self.send_response(204)
                     self.end_headers()
+            elif path == "/api/report-progress":
+                self._send_json(report_state())
             elif path == "/api/setup-progress":
                 from urllib.parse import parse_qs, urlparse
                 step = (parse_qs(urlparse(self.path).query).get("step") or [""])[0]
@@ -2921,7 +2923,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/apply-update":
                 self._send_json(apply_update_now())
             elif path == "/api/report":
-                self._send_json(build_report())
+                self._send_json(start_report())
             elif path == "/api/pick-ipa-files":
                 self._send_json(pick_ipa_files())
             elif path == "/api/pick-save-path":
@@ -3329,6 +3331,34 @@ def _reachable(url: str) -> str:
         return "доступен (" + str(int((time.time() - started) * 1000)) + " мс)"
     except Exception as e:
         return "НЕДОСТУПЕН — " + str(e)[:120]
+
+
+_report_job: dict = {"running": False, "done": False}
+
+
+def start_report() -> dict:
+    """Отчёт собирается в фоне. На Windows он занимает до полуминуты (опрос
+    телефона, проверка связи), и окно успевало оборвать запрос - кнопка
+    выглядела нерабочей."""
+    if _report_job.get("running"):
+        return {"ok": True, "started": True, "already": True}
+    _report_job.update({"running": True, "done": False, "path": None, "error": None})
+
+    def work():
+        try:
+            result = build_report()
+        except Exception as e:
+            result = {"ok": False, "error": str(e)}
+        _report_job.update({"running": False, "done": True,
+                            "path": result.get("path"), "error": result.get("error"),
+                            "ok": result.get("ok")})
+
+    threading.Thread(target=work, daemon=True).start()
+    return {"ok": True, "started": True}
+
+
+def report_state() -> dict:
+    return dict(_report_job)
 
 
 def build_report() -> dict:

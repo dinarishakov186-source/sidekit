@@ -1172,7 +1172,10 @@ async function loadVanished() {
     list.innerHTML = "<div class='empty-state'>" + (result.error || "Не удалось получить список") + "</div>";
     return;
   }
-  if (!result.apps.length) {
+  // Даже когда с этого телефона ничего не пропало, в памяти могут лежать
+  // приложения с других телефонов - и кнопка «показать ещё» должна быть.
+  // Раньше здесь был безусловный выход, и до неё дело не доходило.
+  if (!result.apps.length && !result.others_count) {
     list.innerHTML = "<div class='empty-state'>Пропавших приложений нет — всё на месте.</div>";
     return;
   }

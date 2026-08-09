@@ -114,7 +114,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-08-09.73-error500"
+SERVER_VERSION = "2026-08-09.83-clear-errors"
 
 
 # ---------------------------------------------------------------------------
@@ -867,7 +867,7 @@ def ipatool_auth_status() -> dict:
     if cached and now - _auth_status_cache["time"] < 30:
         return cached
 
-    tool = find_tool("ipatool")
+    tool = active_ipatool()
     status = None
     if tool:
         try:
@@ -917,7 +917,7 @@ def ipatool_logout() -> dict:
         run(["security", "delete-generic-password", "-s", KEYCHAIN_SERVICE], timeout=15)
     else:
         # ipatool owns the stored credential on Windows, so ask it to drop it.
-        tool = find_tool("ipatool")
+        tool = active_ipatool()
         if tool:
             run([tool, "auth", "revoke", "--non-interactive", "--format", "json"]
                 + ipatool_keychain_args(), timeout=30)
@@ -974,7 +974,7 @@ def suspicious_login(email: str) -> str:
 
 
 def ipatool_login(email: str, password: str, auth_code: str | None, force: bool = False) -> dict:
-    tool = find_tool("ipatool")
+    tool = active_ipatool()
     if not tool:
         return {"ok": False, "error": "ipatool не установлен"}
     # Apple на неверный пароль и на «нужен код» отвечает ОДНОЙ И ТОЙ ЖЕ
@@ -1016,19 +1016,25 @@ def ipatool_login(email: str, password: str, auth_code: str | None, force: bool 
     # код. Свежий ipatool сам выбирает, на какой сервер Apple идти, и порой
     # выбирает не тот. Пробуем ещё раз, а потом - запасной ipatool постарше,
     # который ходит по постоянному адресу.
-    def looks_like_apple_404(text: str) -> bool:
+    def looks_like_apple_block(text: str) -> bool:
+        # Apple может ответить и 403, и 404 - в обоих случаях дело не в пароле,
+        # а в том, что свежий ipatool стучится не туда.
         low = text.lower()
-        return "404" in low and ("unexpected response" in low or "not found" in low)
+        return "unexpected response from apple" in low
 
-    if looks_like_apple_404((out or "") + (err or "")):
-        remember_error("вход в Apple ID", "Apple ответила 404, пробую ещё раз")
+    if looks_like_apple_block((out or "") + (err or "")):
+        remember_error("вход в Apple ID", "Apple отказала: " + ((err or out) or "")[:200])
         time.sleep(1.5)
         rc, out, err = run(build_cmd(tool), timeout=90)   # бывает разовым
-    if looks_like_apple_404((out or "") + (err or "")):
+    if looks_like_apple_block((out or "") + (err or "")):
         spare = ensure_legacy_ipatool()                   # при нужде докачает
-        if spare:
+        if spare and str(spare) != tool:
             time.sleep(1)
             rc, out, err = run(build_cmd(str(spare)), timeout=120)
+            if not looks_like_apple_block((out or "") + (err or "")):
+                # Запасной разговаривает с Apple - значит на этой машине
+                # работать надо им, и дальше тоже (скачивание, поиск).
+                remember_ipatool_choice(True)
 
     # Read BOTH streams. ipatool prints its result as JSON, but sends failures
     # (including "2FA code is required") to stderr - looking only at stdout is
@@ -1126,7 +1132,7 @@ def ipatool_login(email: str, password: str, auth_code: str | None, force: bool 
 
 
 def ipatool_search(term: str, limit: int) -> dict:
-    tool = find_tool("ipatool")
+    tool = active_ipatool()
     if not tool:
         return {"ok": False, "error": "ipatool не установлен"}
     cmd = [tool, "search", term, "--limit", str(limit), "--non-interactive", "--format", "json"] + ipatool_keychain_args()
@@ -1150,6 +1156,28 @@ def _clean_python_traceback(raw: str) -> str | None:
         if re.match(r"^[A-Za-z_]+(Error|Exception)\b.*:", line):
             return line
     return None
+
+
+APPLE_ERROR_HINTS = (
+    ("no such host", "Нет связи с Apple — интернет пропал на секунду. Попробуй ещё раз."),
+    ("dial tcp", "Не получилось достучаться до Apple — проверь интернет и попробуй ещё раз."),
+    ("timeout", "Apple не ответила вовремя. Попробуй ещё раз."),
+    ("app not found", "Этого приложения больше нет в каталоге App Store — Apple его не отдаёт."),
+    ("license", "Apple говорит, что это приложение не покупалось этим Apple ID."),
+    ("403", "Apple отказала в доступе. Попробуй ещё раз через минуту."),
+    ("429", "Слишком часто обращались к Apple. Подожди пару минут."),
+)
+
+
+def humanize_apple_error(raw: str) -> str:
+    """Превращает ответ ipatool в понятную причину. «Неизвестная ошибка» -
+    худший из возможных ответов: она заставляет гадать там, где причина уже
+    написана, просто по-английски и в общем потоке."""
+    low = (raw or "").lower()
+    for marker, text in APPLE_ERROR_HINTS:
+        if marker in low:
+            return text
+    return ""
 
 
 def _extract_error_text(raw: str) -> str:
@@ -1906,10 +1934,11 @@ def _run_restore_job(tool: str, bundle_id: str, item_id: int, name: str,
     with _download_lock:
         _download_state.update({
             "running": False, "status": "done" if ok else "error",
-            "error": None if ok else _extract_error_text(raw), "raw": raw,
+            "error": None if ok else (humanize_apple_error(raw) or _extract_error_text(raw)),
+            "raw": raw,
         })
     if not ok:
-        message = _extract_error_text(raw)
+        message = humanize_apple_error(raw) or _extract_error_text(raw)
         if "license" in message.lower():
             message = (
                 "У этого Apple ID нет лицензии на приложение — оно ни разу не "
@@ -1966,7 +1995,7 @@ def _run_restore_job(tool: str, bundle_id: str, item_id: int, name: str,
 
 def restore_app(bundle_id: str, item_id: int | None, name: str | None,
                 udid: str | None = None) -> dict:
-    tool = find_tool("ipatool")
+    tool = active_ipatool()
     if not tool:
         return {"ok": False, "error": "ipatool не установлен"}
 
@@ -2196,7 +2225,7 @@ def _run_download_job(tool: str, bundle_id: str, purchase: bool, out_path: Path,
 
     error_text = None
     if not ok:
-        error_text = _extract_error_text(raw)
+        error_text = humanize_apple_error(raw) or _extract_error_text(raw)
         low = error_text.lower()
         if _looks_like_lost_session(error_text):
             # ipatool can no longer read its saved Apple ID session. SideKit
@@ -2244,7 +2273,7 @@ def ipatool_download(bundle_id: str, purchase: bool, dest_path: str | None) -> d
     """Starts the download as a background job instead of blocking, so the
     frontend can poll /api/download-progress for a real percentage instead
     of staring at an indeterminate spinner."""
-    tool = find_tool("ipatool")
+    tool = active_ipatool()
     if not tool:
         return {"ok": False, "error": "ipatool не установлен"}
     with _download_lock:
@@ -2505,7 +2534,8 @@ def _run_install_job(ipa_path: str, udid: str | None) -> None:
         )
     else:
         status = "done" if ok else "error"
-        error = None if ok else (_clean_python_traceback(raw) or _extract_error_text(raw))
+        error = None if ok else (humanize_apple_error(raw)
+                                 or _clean_python_traceback(raw) or _extract_error_text(raw))
         if ok:
             confirmed, detail = confirm_installed_on_phone(ipa_path, udid)
             if not confirmed:
@@ -2644,14 +2674,16 @@ ICON_RECHECK_SECONDS = 0
 
 def icon_needs_refresh(bundle_id: str) -> bool:
     path = icon_path(bundle_id)
+    if bundle_id in _store_icon_marks():
+        # Значок взят из App Store. Он бывает меньше телефонного, и раньше
+        # его принимали за заглушку и затирали обратно серым квадратом.
+        return False
     try:
         stats = path.stat()
     except OSError:
         return True   # нет файла
     if stats.st_size >= PLACEHOLDER_ICON_LIMIT:
         return False
-    # Suspiciously small: ask the phone again, but not on every refresh - some
-    # icons really are this simple, and re-fetching those forever is waste.
     return time.time() - stats.st_mtime > ICON_RECHECK_SECONDS
 
 
@@ -2686,6 +2718,145 @@ def prefetch_icons(bundle_ids: list, udid: str | None) -> None:
                 _icons_fetching = False
 
     threading.Thread(target=job, daemon=True).start()
+
+
+_store_icon_lock = threading.Lock()
+STORE_ICON_MARKS = ICONS_DIR / "from_store.json"
+
+
+def _store_icon_marks() -> set:
+    """Какие значки уже взяты из App Store. Без этой пометки маленький, но
+    настоящий значок магазина каждый раз считался бы заглушкой."""
+    try:
+        return set(json.loads(STORE_ICON_MARKS.read_text(encoding="utf-8")))
+    except Exception:
+        return set()
+
+
+def _save_store_icon_marks(marks: set) -> None:
+    try:
+        ICONS_DIR.mkdir(parents=True, exist_ok=True)
+        STORE_ICON_MARKS.write_text(json.dumps(sorted(marks)), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def icon_content_type(data: bytes) -> str:
+    """Значки с телефона приходят в PNG, из App Store - обычно в JPEG."""
+    if data[:8].startswith(b"\x89PNG"):
+        return "image/png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    return "application/octet-stream"
+
+
+def fetch_store_icons(bundle_ids: list) -> int:
+    """Достаёт настоящие значки из App Store для приложений, которых на этом
+    телефоне нет - у них неоткуда взяться значку с устройства, и раньше вместо
+    них стояли серые заглушки. Идентификаторы у нас уже записаны в базе."""
+    known = load_known_apps() or {}
+    marks = _store_icon_marks()
+    wanted = {}
+    for bundle_id in bundle_ids:
+        if not SAFE_BUNDLE_ID.fullmatch(bundle_id or ""):
+            continue
+        if bundle_id in marks:
+            continue                       # уже брали из App Store
+        existing = icon_path(bundle_id)
+        if existing.exists():
+            try:
+                # Телефон отдаёт серую заглушку для приложений, которых на нём
+                # нет. Файл вроде есть - а смотреть не на что, поэтому такие
+                # заменяем настоящим значком из App Store.
+                if existing.stat().st_size >= PLACEHOLDER_ICON_LIMIT:
+                    continue
+            except OSError:
+                pass
+        entry = known.get(bundle_id) or {}
+        item_id = entry.get("item_id")
+        if item_id:
+            wanted[str(item_id)] = bundle_id
+    if not wanted:
+        return 0
+
+    if _download_state.get("running") or _install_state.get("running"):
+        return 0                       # телефон и сеть заняты делом важнее
+    saved = 0
+    ids = list(wanted)
+    # Магазин у Apple разный по странам: российское приложение в американском
+    # каталоге просто не найдётся. Поэтому спрашиваем по очереди.
+    for country in ("ru", "us", "kz", "by"):
+        ids = [i for i in ids if wanted[i] not in marks]
+        if not ids:
+            break
+        for start in range(0, len(ids), 100):      # Apple принимает пачками
+            batch = ids[start:start + 100]
+            try:
+                raw = _fetch("https://itunes.apple.com/lookup?country=" + country
+                             + "&id=" + ",".join(batch), timeout=40)
+                answer = json.loads(raw.decode("utf-8", "replace"))
+            except Exception as e:
+                remember_error("значки из App Store", str(e)[:200])
+                continue
+            saved += _save_icons_from_lookup(answer, wanted, marks)
+    _save_store_icon_marks(marks)
+    return saved
+
+
+def _save_icons_from_lookup(answer: dict, wanted: dict, marks: set) -> int:
+    saved = 0
+    if True:
+        for item in answer.get("results", []):
+            bundle_id = wanted.get(str(item.get("trackId")))
+            url = item.get("artworkUrl100") or item.get("artworkUrl60")
+            if not bundle_id or not url:
+                continue
+            # Значок покрупнее: у Apple размер зашит прямо в адрес.
+            url = url.replace("/100x100bb", "/256x256bb").replace("/60x60bb", "/256x256bb")
+            try:
+                data = _fetch(url, timeout=40)
+                time.sleep(0.15)       # небольшая пауза, чтобы не долбить Apple
+                if len(data) > 500:
+                    ICONS_DIR.mkdir(parents=True, exist_ok=True)
+                    icon_path(bundle_id).write_bytes(data)
+                    marks.add(bundle_id)
+                    saved += 1
+            except Exception:
+                continue
+    return saved
+
+
+def repair_store_icons() -> int:
+    """Возвращает настоящие значки тем приложениям, которым телефон успел
+    подсунуть свою серую заглушку. Заглушка у всех одна и та же, поэтому
+    находим её по самому частому содержимому."""
+    try:
+        from collections import Counter
+        digests = {}
+        for file in ICONS_DIR.glob("*.png"):
+            try:
+                if file.stat().st_size < PLACEHOLDER_ICON_LIMIT:
+                    digests[file.stem] = hashlib.sha256(file.read_bytes()).hexdigest()
+            except OSError:
+                continue
+        if not digests:
+            return 0
+        common, count = Counter(digests.values()).most_common(1)[0]
+        if count < 5:
+            return 0                      # одинаковых мало - это не заглушка
+        broken = [name for name, digest in digests.items() if digest == common]
+        marks = _store_icon_marks()
+        marks.difference_update(broken)
+        _save_store_icon_marks(marks)
+        for name in broken:
+            try:
+                icon_path(name).unlink()
+            except OSError:
+                pass
+        return fetch_store_icons(broken)
+    except Exception as e:
+        remember_error("починка значков", str(e)[:200])
+        return 0
 
 
 def read_cached_icon(bundle_id: str, wait_seconds: float = 45.0) -> bytes | None:
@@ -2999,6 +3170,16 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/vanished-apps":
                 remember_installed_apps(None, query.get("udid"))
                 result = list_vanished_apps(query.get("udid"), query.get("all") == "1")
+                # Приложений с других телефонов на устройстве нет, значков
+                # тоже - тянем их из App Store пачкой, пока человек смотрит.
+                need_icons = [a.get("bundle_id") for a in result.get("apps", [])
+                              if a.get("bundle_id")]
+                if need_icons:
+                    def icons_job():
+                        fetch_store_icons(need_icons)
+                        repair_store_icons()
+
+                    threading.Thread(target=icons_job, daemon=True).start()
                 # The phone still holds the home-screen icon of a vanished
                 # app, so this list can look like the home screen too - but
                 # nothing has asked for those icons before now.
@@ -3008,12 +3189,23 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/restore-progress":
                 self._send_json(get_restore_progress())
             elif path == "/api/app-icon":
-                icon = read_cached_icon(query.get("bundle_id", ""))
+                bundle_id = query.get("bundle_id", "")
+                icon = read_cached_icon(bundle_id, wait_seconds=3.0)
+                if icon is not None and len(icon) < PLACEHOLDER_ICON_LIMIT \
+                        and bundle_id not in _store_icon_marks():
+                    with _store_icon_lock:
+                        fetch_store_icons([bundle_id])
+                    icon = read_cached_icon(bundle_id, wait_seconds=1.0) or icon
+                if icon is None:
+                    # Значка с телефона нет - пробуем App Store.
+                    with _store_icon_lock:
+                        fetch_store_icons([bundle_id])
+                    icon = read_cached_icon(bundle_id, wait_seconds=1.0)
                 if icon is None:
                     self._send_json({"error": "no icon"}, status=404)
                 else:
                     self.send_response(200)
-                    self.send_header("Content-Type", "image/png")
+                    self.send_header("Content-Type", icon_content_type(icon))
                     self.send_header("Content-Length", str(len(icon)))
                     self.send_header("Cache-Control", "max-age=86400")
                     self.end_headers()
@@ -3444,6 +3636,38 @@ USER_BIN_DIR = LOCK_DIR / "bin"
 LEGACY_NAME = "ipatool-legacy.exe" if IS_WINDOWS else "ipatool-legacy"
 
 
+IPATOOL_CHOICE_FILE = LOCK_DIR / "ipatool_choice.txt"
+
+
+def preferred_ipatool_is_legacy() -> bool:
+    try:
+        return IPATOOL_CHOICE_FILE.read_text(encoding="utf-8").strip() == "legacy"
+    except Exception:
+        return False
+
+
+def remember_ipatool_choice(use_legacy: bool) -> None:
+    """Запоминает, какой ipatool на этой машине разговаривает с Apple. У разных
+    людей по-разному: свежий сам выбирает сервер Apple и местами получает от
+    него 403/404, а старый ходит по постоянному адресу и работает."""
+    try:
+        LOCK_DIR.mkdir(parents=True, exist_ok=True)
+        IPATOOL_CHOICE_FILE.write_text("legacy" if use_legacy else "main", encoding="utf-8")
+    except Exception:
+        pass
+
+
+def active_ipatool() -> str | None:
+    """Тот ipatool, которым работаем сейчас. Важно, чтобы он был один и тот же
+    везде: сессия входа хранится в связке ключей в своём формате."""
+    if preferred_ipatool_is_legacy():
+        spare = legacy_ipatool() or ensure_legacy_ipatool()
+        if spare:
+            return str(spare)
+    tool = find_tool("ipatool")      # именно поиск на диске, иначе вызов сам себя
+    return str(tool) if tool else None
+
+
 def legacy_ipatool() -> Path | None:
     """Запасной ipatool 2.2.0. Он ходит к Apple по постоянному адресу, и
     выручает, когда свежий получает от Apple 404 при вводе кода."""
@@ -3514,9 +3738,13 @@ def update_note() -> dict:
 
 
 def active_index_html() -> Path:
-    """Интерфейс из обновления, если он скачан."""
+    """Интерфейс из обновления - но только если это обновление действительно
+    новее нас. Иначе после вселения обновления в папку программы рядом
+    оставалась старая копия, и окно продолжало показывать её."""
     updated = UPDATE_DIR / "index.html"
-    return updated if updated.exists() else INDEX_HTML
+    if updated.exists() and _version_of(UPDATE_DIR / "server.py") > SERVER_VERSION:
+        return updated
+    return INDEX_HTML
 
 
 def _human_size(num: float) -> str:
@@ -3637,7 +3865,30 @@ def diagnose(udid: str | None = None) -> dict:
                         break
                 except Exception:
                     pass
-            detail = found_service or ("служба Apple не найдена — поставь «Apple Devices» "
+            if not found_service:
+                # Современная «Apple Devices» из магазина не заводит старую
+                # службу. Раз она (или iTunes) стоит - драйверы есть, а телефон
+                # просто не подключён.
+                installed_apple = ""
+                try:
+                    probe = subprocess.run(
+                        ["powershell", "-NoProfile", "-Command",
+                         "$a=@(); if (Get-AppxPackage -Name AppleInc.AppleDevices -ErrorAction "
+                         "SilentlyContinue) { $a += 'Apple Devices' }; "
+                         "if (Get-ItemProperty HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion"
+                         "\\Uninstall\\*, HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows"
+                         "\\CurrentVersion\\Uninstall\\* -ErrorAction SilentlyContinue | "
+                         "Where-Object { $_.DisplayName -like '*iTunes*' }) { $a += 'iTunes' }; "
+                         "$a -join ', '"],
+                        capture_output=True, text=True, timeout=60, **NO_CONSOLE)
+                    installed_apple = (probe.stdout or "").strip()
+                except Exception:
+                    pass
+                if installed_apple:
+                    found_service = ("установлено: " + installed_apple
+                                     + " — телефон сейчас не подключён")
+                    ok = True
+            detail = found_service or ("драйверов Apple не найдено — поставь «Apple Devices» "
                                        "из Microsoft Store и подключи телефон кабелем")
         add("Драйвер Apple", ok, detail)
     else:
@@ -3665,7 +3916,7 @@ def diagnose(udid: str | None = None) -> dict:
         else proxy.get("error", "нет данных"))
 
     # 6. ipatool
-    tool = find_tool("ipatool")
+    tool = active_ipatool()
     if tool:
         version = _tool_version(tool)
         auth = ipatool_auth_status()
@@ -3798,7 +4049,7 @@ def build_report() -> dict:
                  + (" · библиотека есть" if interpreter_has_library(exe) else " · библиотеки нет"))
 
     L += ["", "== СОСТАВНЫЕ ЧАСТИ =="]
-    main_tool = find_tool("ipatool")
+    main_tool = active_ipatool()
     L.append("ipatool: " + (str(main_tool) + " · " + _tool_version(main_tool) if main_tool else "НЕ НАЙДЕН"))
     spare = legacy_ipatool()
     L.append("запасной ipatool: " + (str(spare) + " · " + _tool_version(spare) if spare else "нет (докачается при нужде)"))
@@ -3873,6 +4124,13 @@ def main():
 
     adopt_update_if_ready()
     heal_installed_copy()
+    # Отработавшую папку обновления убираем: если она старше нас, толку от
+    # неё нет, а окно рискует показывать оттуда прошлый интерфейс.
+    try:
+        if (UPDATE_DIR / "server.py").exists() and _version_of(UPDATE_DIR / "server.py") <= SERVER_VERSION:
+            shutil.rmtree(UPDATE_DIR, ignore_errors=True)
+    except Exception:
+        pass
     switch_python_if_needed()
     # До подъёма сервера остаётся только то, что решает, каким файлом и каким
     # питоном мы работаем: обе проверки читают диск и в сеть не ходят.

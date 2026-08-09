@@ -268,7 +268,9 @@
     margin: 10px 2px 0; font-size: 10.5px; color: #8a8a8e; text-align: center;
   }
   .modal-back {
-    display: none; position: fixed; inset: 0; z-index: 100;
+    /* top/left/right/bottom вместо inset: краткую запись Safari на старых
+       Маках не понимает, и окно поверх экрана оказывалось не на месте. */
+    display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 100;
     background: rgba(0,0,0,.28); align-items: center; justify-content: center;
     -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
   }

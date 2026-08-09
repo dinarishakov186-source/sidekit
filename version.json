@@ -1,8 +1,8 @@
 {
-  "version": "2026-08-09.87-model-name",
-  "notes": "модель и чип телефона по-человечески",
+  "version": "2026-08-09.88-old-mac",
+  "notes": "окно сведений корректно на старых Маках",
   "sha256": {
-    "server.py": "edb9000fa0567735822941e24f35c41ce4de70261a062e1697c71c13ec3da231",
-    "index.html": "3cd997673ef547adee4cf7c9f9356de4f2403550ef197766b8b0b3e55903edae"
+    "server.py": "31854fae417eee2ed03d5fcce4a888831b8c90a65605c5b51dbf50396b0ff86b",
+    "index.html": "8a65998f8c7cceec4f383bc1c89e334ddba30000e03505849f1ceedde5b696b0"
   }
 }

@@ -1,8 +1,8 @@
 {
-  "version": "2026-08-07.70-update-modal",
-  "notes": "окно с предложением обновиться; терминал больше не открывается",
+  "version": "2026-08-07.72-selfheal",
+  "notes": "обновление само вселяется в папку программы",
   "sha256": {
-    "server.py": "2b4cecd9193fb4575a14197429ebb66c5fe6b16c198d781996b9bf4b68975d8c",
+    "server.py": "d684c58c95192ac709a9bc1ec6e9bbc42950a03abc92ccb79af0cba1ba03f3d3",
     "index.html": "095dba9874dc930c23516f33fd4dda8a441f2f7cd739d9e2b1cfda0ef6990d00"
   }
 }

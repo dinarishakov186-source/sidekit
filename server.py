@@ -114,7 +114,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-08-07.70-update-modal"
+SERVER_VERSION = "2026-08-07.72-selfheal"
 
 
 # ---------------------------------------------------------------------------
@@ -3270,6 +3270,28 @@ def running_version() -> str:
     return max(found, SERVER_VERSION) if found else SERVER_VERSION
 
 
+def heal_installed_copy() -> None:
+    """Если мы сами запущены из папки обновлений, а в папке программы лежит
+    версия постарше - переписываем её собой. Старая версия сделать этого не
+    могла (в ней такого кода нет), поэтому лечит всегда новая: со следующего
+    запуска ярлык открывает уже свежий файл напрямую."""
+    try:
+        running_file = Path(os.path.abspath(__file__))
+        if UPDATE_DIR not in running_file.parents:
+            return
+        installed = RESOURCES_DIR / "server.py"
+        if not installed.exists() or not os.access(str(RESOURCES_DIR), os.W_OK):
+            return
+        if _version_of(installed) >= SERVER_VERSION:
+            return
+        shutil.copy2(running_file, installed)
+        page = running_file.with_name("index.html")
+        if page.exists():
+            shutil.copy2(page, RESOURCES_DIR / "index.html")
+    except Exception:
+        pass
+
+
 def adopt_update_if_ready() -> None:
     """Если рядом лежит скачанная версия свежее нынешней - запускаемся из неё.
     Она уже прошла проверку запуском при скачивании."""
@@ -3278,6 +3300,25 @@ def adopt_update_if_ready() -> None:
     candidate = UPDATE_DIR / "server.py"
     if not candidate.exists() or _version_of(candidate) <= SERVER_VERSION:
         return
+    # Если папку программы можно переписать (на Windows она в профиле
+    # пользователя), вселяем обновление прямо в неё. Тогда в следующий раз
+    # ярлык сразу запустит новую версию, без промежуточного перезапуска -
+    # а он и приводил к тому, что программа оказывалась под консольным
+    # python.exe вместо безоконного.
+    installed = RESOURCES_DIR / "server.py"
+    try:
+        if os.access(RESOURCES_DIR, os.W_OK) and installed.exists():
+            shutil.copy2(candidate, installed)
+            updated_page = UPDATE_DIR / "index.html"
+            if updated_page.exists():
+                shutil.copy2(updated_page, RESOURCES_DIR / "index.html")
+            shutil.rmtree(UPDATE_DIR, ignore_errors=True)
+            os.environ["SIDEKIT_UPDATED"] = "1"
+            os.environ["SIDEKIT_HOME"] = str(RESOURCES_DIR)
+            os.execv(GUI_PYTHON_EXE, [GUI_PYTHON_EXE, str(installed)] + sys.argv[1:])
+    except Exception:
+        pass                        # не вышло - едем прежним путём
+
     os.environ["SIDEKIT_UPDATED"] = "1"
     os.environ["SIDEKIT_HOME"] = str(RESOURCES_DIR)
     try:
@@ -3825,6 +3866,7 @@ def main():
         return
 
     adopt_update_if_ready()
+    heal_installed_copy()
     switch_python_if_needed()
     # До подъёма сервера остаётся только то, что решает, каким файлом и каким
     # питоном мы работаем: обе проверки читают диск и в сеть не ходят.

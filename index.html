@@ -267,6 +267,28 @@
   .version-line {
     margin: 10px 2px 0; font-size: 10.5px; color: #8a8a8e; text-align: center;
   }
+  .modal-back {
+    display: none; position: fixed; inset: 0; z-index: 100;
+    background: rgba(0,0,0,.28); align-items: center; justify-content: center;
+    -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
+  }
+  .modal-back.on { display: flex; }
+  .modal-card {
+    background: #fff; border-radius: 14px; padding: 26px 28px 20px;
+    width: 330px; text-align: center;
+    box-shadow: 0 18px 50px rgba(0,0,0,.25);
+  }
+  .modal-title { font-size: 17px; font-weight: 600; margin-bottom: 6px; }
+  .modal-note { font-size: 12.5px; color: #6a6a6e; line-height: 1.4; margin-bottom: 18px; }
+  .modal-btn {
+    width: 100%; padding: 10px; border: none; border-radius: 9px;
+    background: #0071e3; color: #fff; font-size: 14px; cursor: pointer;
+  }
+  .modal-btn:disabled { opacity: .6; cursor: default; }
+  .modal-later {
+    width: 100%; margin-top: 8px; padding: 6px; border: none; background: none;
+    color: #8a8a8e; font-size: 12px; cursor: pointer;
+  }
 </style>
 </head>
 <body>
@@ -323,6 +345,18 @@
             onclick="runDiagnose(this)">🔌 Почему телефон не виден</button>
     <button class="sidebar-btn report-btn" onclick="sendReport(this)">🧾 Сообщить об ошибке</button>
     <div class="version-line" id="versionLine"></div>
+  </div>
+
+  <!-- Окно об обновлении: показывается поверх всего, чтобы его не пролистали
+       мимо. Кнопка «Позже» оставлена нарочно - если обновление вдруг не
+       ставится, человек не должен оказаться заперт в этом окне. -->
+  <div class="modal-back" id="updateModal">
+    <div class="modal-card">
+      <div class="modal-title">Вышло новое обновление</div>
+      <div class="modal-note" id="updateModalNote"></div>
+      <button class="modal-btn" id="updateModalBtn" onclick="applyUpdate(this)">Обновить</button>
+      <button class="modal-later" onclick="hideUpdateModal()">Позже</button>
+    </div>
   </div>
 
   <div id="main">
@@ -614,7 +648,12 @@ async function checkUpdateNote() {
       document.getElementById("versionLine").textContent = "версия " + st.version;
     }
     const box = document.getElementById("updateNote");
-    if (!st.update || !st.update.available) { box.classList.remove("on"); return; }
+    if (!st.update || !st.update.available) {
+      box.classList.remove("on");
+      document.getElementById("updateModal").classList.remove("on");
+      return;
+    }
+    showUpdateModal(st.update);
     box.classList.add("on");
     box.innerHTML = "";
     const text = document.createElement("div");
@@ -630,6 +669,25 @@ async function checkUpdateNote() {
 
 // Обновление применяется на месте: движок перезапускается на том же адресе,
 // поэтому окно просто перезагружает страницу. Закрывать программу не надо.
+let updateModalDismissed = "";
+
+function showUpdateModal(update) {
+  // Один раз за запуск на каждую версию: нажал «Позже» - больше не пристаём,
+  // подсказка остаётся в левой панели.
+  if (updateModalDismissed === update.version) return;
+  const note = document.getElementById("updateModalNote");
+  note.dataset.version = update.version || "";
+  note.textContent = (update.notes ? update.notes + ". " : "")
+    + "Обновление уже скачано — нажми «Обновить», окно перезагрузится само.";
+  document.getElementById("updateModal").classList.add("on");
+}
+
+function hideUpdateModal() {
+  const note = document.getElementById("updateModalNote");
+  updateModalDismissed = note.dataset.version || "показано";
+  document.getElementById("updateModal").classList.remove("on");
+}
+
 async function applyUpdate(btn) {
   btn.disabled = true;
   btn.textContent = "Обновляю…";
@@ -1501,7 +1559,7 @@ async function checkAppleIdStatus() {
   await checkAppleIdStatus();
   await loadDevices();
   checkUpdateNote();
-  setInterval(checkUpdateNote, 600000);
+  setInterval(checkUpdateNote, 60000);   // раз в минуту, запрос местный и дешёвый
 })();
 </script>
 </body>

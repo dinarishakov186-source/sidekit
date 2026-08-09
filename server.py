@@ -114,7 +114,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-08-09.83-clear-errors"
+SERVER_VERSION = "2026-08-09.87-model-name"
 
 
 # ---------------------------------------------------------------------------
@@ -3132,6 +3132,8 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self.send_response(204)
                     self.end_headers()
+            elif path == "/api/device-info":
+                self._send_json(device_info(query.get("udid")))
             elif path == "/api/diagnose-progress":
                 self._send_json(dict(_diagnose_job))
             elif path == "/api/report-progress":
@@ -3747,6 +3749,16 @@ def active_index_html() -> Path:
     return INDEX_HTML
 
 
+def _decimal_size(num: float) -> str:
+    """Гигабайты так, как их считает Apple: 1 ГБ = 1000 МБ. Иначе 128-гиговый
+    телефон показывал бы 119, и цифры не сходились бы с самим iPhone."""
+    for unit in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
+        if num < 1000 or unit == "ТБ":
+            return f"{num:.1f} {unit}"
+        num /= 1000
+    return str(num)
+
+
 def _human_size(num: float) -> str:
     for unit in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
         if num < 1024 or unit == "ТБ":
@@ -3830,6 +3842,172 @@ async def main():
 
 asyncio.run(main())
 '''
+
+
+_DEVICE_INFO_SCRIPT = r'''
+import asyncio, inspect, json, sys
+from pymobiledevice3.lockdown import create_using_usbmux
+
+async def main():
+    udid = sys.argv[1] or None
+    lockdown = create_using_usbmux(serial=udid) if udid else create_using_usbmux()
+    if inspect.iscoroutine(lockdown):
+        lockdown = await lockdown
+
+    async def value(domain=None, key=None):
+        try:
+            got = lockdown.get_value(domain=domain, key=key)
+            if inspect.iscoroutine(got):
+                got = await got
+            return got
+        except Exception:
+            return None
+
+    info = await value() or {}
+    disk = await value("com.apple.disk_usage") or {}
+    battery = await value("com.apple.mobile.battery") or {}
+
+    out = {"main": {k: info.get(k) for k in (
+        "DeviceName", "ProductType", "ProductVersion", "BuildVersion", "ModelNumber",
+        "RegionInfo", "SerialNumber", "UniqueDeviceID", "DeviceColor", "DeviceEnclosureColor",
+        "WiFiAddress", "BluetoothAddress", "InternationalMobileEquipmentIdentity",
+        "InternationalMobileEquipmentIdentity2", "CPUArchitecture", "HardwareModel",
+        "ActivationState", "PasswordProtected", "TimeZone", "FirmwareVersion",
+    ) if info.get(k) is not None},
+        "disk": {k: disk.get(k) for k in (
+            "TotalDiskCapacity", "TotalDataCapacity", "TotalDataAvailable",
+            "TotalSystemCapacity", "TotalSystemAvailable",
+            "AmountDataAvailable", "AmountDataReserved", "AmountRestoreAvailable",
+        ) if disk.get(k) is not None},
+        "battery": {k: battery.get(k) for k in (
+            "BatteryCurrentCapacity", "BatteryIsCharging", "ExternalConnected",
+        ) if battery.get(k) is not None}}
+
+    # Здоровье батареи лежит отдельно и не на всех прошивках доступно.
+    try:
+        from pymobiledevice3.services.diagnostics import DiagnosticsService
+        service = DiagnosticsService(lockdown)
+        got = service.get_battery()
+        if inspect.iscoroutine(got):
+            got = await got
+        if isinstance(got, dict):
+            out["battery"].update({k: got.get(k) for k in (
+                "CycleCount", "NominalChargeCapacity", "DesignCapacity",
+                "BatteryHealth", "UpdatedBatteryStatus") if got.get(k) is not None})
+    except Exception:
+        pass
+    print(json.dumps(out, ensure_ascii=False, default=str))
+
+asyncio.run(main())
+'''
+
+
+# Телефон называет себя «iPhone15,4» и говорит «arm64e» - это тип ядра, а не
+# имя чипа. Человеку нужны «iPhone 15» и «A16 Bionic», поэтому держим табличку.
+# Чего в ней нет - показываем как есть, выдумывать не будем.
+DEVICE_MODELS = {
+    "iPhone12,1": ("iPhone 11", "A13 Bionic"),
+    "iPhone12,3": ("iPhone 11 Pro", "A13 Bionic"),
+    "iPhone12,5": ("iPhone 11 Pro Max", "A13 Bionic"),
+    "iPhone12,8": ("iPhone SE (2-го поколения)", "A13 Bionic"),
+    "iPhone13,1": ("iPhone 12 mini", "A14 Bionic"),
+    "iPhone13,2": ("iPhone 12", "A14 Bionic"),
+    "iPhone13,3": ("iPhone 12 Pro", "A14 Bionic"),
+    "iPhone13,4": ("iPhone 12 Pro Max", "A14 Bionic"),
+    "iPhone14,2": ("iPhone 13 Pro", "A15 Bionic"),
+    "iPhone14,3": ("iPhone 13 Pro Max", "A15 Bionic"),
+    "iPhone14,4": ("iPhone 13 mini", "A15 Bionic"),
+    "iPhone14,5": ("iPhone 13", "A15 Bionic"),
+    "iPhone14,6": ("iPhone SE (3-го поколения)", "A15 Bionic"),
+    "iPhone14,7": ("iPhone 14", "A15 Bionic"),
+    "iPhone14,8": ("iPhone 14 Plus", "A15 Bionic"),
+    "iPhone15,2": ("iPhone 14 Pro", "A16 Bionic"),
+    "iPhone15,3": ("iPhone 14 Pro Max", "A16 Bionic"),
+    "iPhone15,4": ("iPhone 15", "A16 Bionic"),
+    "iPhone15,5": ("iPhone 15 Plus", "A16 Bionic"),
+    "iPhone16,1": ("iPhone 15 Pro", "A17 Pro"),
+    "iPhone16,2": ("iPhone 15 Pro Max", "A17 Pro"),
+    "iPhone17,1": ("iPhone 16 Pro", "A18 Pro"),
+    "iPhone17,2": ("iPhone 16 Pro Max", "A18 Pro"),
+    "iPhone17,3": ("iPhone 16", "A18"),
+    "iPhone17,4": ("iPhone 16 Plus", "A18"),
+    "iPhone17,5": ("iPhone 16e", "A18"),
+}
+
+
+def device_info(udid: str | None) -> dict:
+    """Подробности о телефоне: модель, прошивка, серийный номер, память,
+    батарея. Всё это телефон рассказывает сам, спрашивать Apple не нужно."""
+    answer = _run_device_script(_DEVICE_INFO_SCRIPT, udid, timeout=90)
+    if not answer:
+        return {"ok": False, "error": "Телефон не ответил. Проверь кабель и разблокируй его."}
+
+    main = answer.get("main") or {}
+    disk = answer.get("disk") or {}
+    battery = answer.get("battery") or {}
+
+    # Телефон отдаёт два «свободно». TotalDataAvailable считает и то, что iOS
+    # при нужде вычистит сам (кэши, выгружаемые приложения) - у меня это дало
+    # 77 ГБ там, где на телефоне 4. Настоящее свободное место - AmountDataAvailable.
+    total = disk.get("TotalDiskCapacity") or disk.get("TotalDataCapacity") or 0
+    free = disk.get("AmountDataAvailable") or 0
+    used = max(0, total - free)
+
+
+    rows = []
+    def add(label, value):
+        if value not in (None, "", {}):
+            rows.append({"label": label, "value": str(value)})
+
+    add("Название", main.get("DeviceName"))
+    identifier = main.get("ProductType") or ""
+    friendly, chip = DEVICE_MODELS.get(identifier, ("", ""))
+    add("Модель", (friendly + " (" + identifier + ")") if friendly else identifier)
+    add("Номер модели", " ".join(x for x in (main.get("ModelNumber"), main.get("RegionInfo")) if x))
+    add("iOS", (str(main.get("ProductVersion") or "") + " (" + str(main.get("BuildVersion") or "") + ")").strip())
+    add("Серийный номер", main.get("SerialNumber"))
+    add("UDID", main.get("UniqueDeviceID"))
+    add("IMEI", main.get("InternationalMobileEquipmentIdentity"))
+    add("IMEI 2", main.get("InternationalMobileEquipmentIdentity2"))
+    add("Процессор", chip or main.get("CPUArchitecture"))
+    add("Wi-Fi адрес", main.get("WiFiAddress"))
+    add("Bluetooth", main.get("BluetoothAddress"))
+    add("Активирован", "да" if main.get("ActivationState") == "Activated" else main.get("ActivationState"))
+    add("Код-пароль", "стоит" if main.get("PasswordProtected") else "нет")
+    add("Часовой пояс", main.get("TimeZone"))
+
+    charge = battery.get("BatteryCurrentCapacity")
+    if charge is not None:
+        state = "заряжается" if battery.get("BatteryIsCharging") else "не заряжается"
+        add("Батарея", str(charge) + "% · " + state)
+    if battery.get("CycleCount"):
+        add("Циклов зарядки", battery.get("CycleCount"))
+    nominal, design = battery.get("NominalChargeCapacity"), battery.get("DesignCapacity")
+    if nominal and design:
+        add("Здоровье батареи", str(round(100 * nominal / design)) + "% от заводской")
+
+    return {
+        "ok": True,
+        "rows": rows,
+        "storage": {
+            "total": total,
+            "used": used,
+            "free": free,
+            # Apple считает память десятичными гигабайтами - поэтому на коробке
+            # 128 ГБ. Считаем так же, иначе цифры не сойдутся с самим телефоном.
+            "total_text": _decimal_size(total),
+            "used_text": _decimal_size(used),
+            "free_text": _decimal_size(free),
+            "percent": round(100 * used / total) if total else 0,
+        },
+        "battery": {
+            "percent": battery.get("BatteryCurrentCapacity"),
+            "charging": bool(battery.get("BatteryIsCharging")),
+            "health": (round(100 * battery["NominalChargeCapacity"] / battery["DesignCapacity"])
+                       if battery.get("NominalChargeCapacity") and battery.get("DesignCapacity") else None),
+            "cycles": battery.get("CycleCount"),
+        },
+    }
 
 
 def diagnose(udid: str | None = None) -> dict:

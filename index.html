@@ -289,6 +289,33 @@
     width: 100%; margin-top: 8px; padding: 6px; border: none; background: none;
     color: #8a8a8e; font-size: 12px; cursor: pointer;
   }
+  .device-menu {
+    display: none; position: fixed; z-index: 200; background: #fff;
+    border-radius: 9px; box-shadow: 0 8px 28px rgba(0,0,0,.22); padding: 4px;
+    min-width: 210px;
+  }
+  .device-menu.on { display: block; }
+  .device-menu button {
+    display: block; width: 100%; text-align: left; border: none; background: none;
+    padding: 8px 12px; font-size: 13px; border-radius: 6px; cursor: pointer; color: #1d1d1f;
+  }
+  .device-menu button:hover { background: #f2f2f7; }
+  .info-card { width: 430px; text-align: left; max-height: 78vh; overflow-y: auto; }
+  .info-card .modal-title { text-align: center; }
+  .info-rows { margin: 4px 0 16px; }
+  .info-row {
+    display: flex; justify-content: space-between; gap: 14px;
+    padding: 6px 0; border-bottom: 1px solid #f0f0f2; font-size: 12.5px;
+  }
+  .info-row:last-child { border-bottom: none; }
+  .info-row .k { color: #6a6a6e; white-space: nowrap; }
+  .info-row .v { color: #1d1d1f; text-align: right; word-break: break-all; }
+  .storage-bar {
+    height: 10px; border-radius: 5px; background: #e9e9ec; overflow: hidden; margin: 10px 0 6px;
+  }
+  .storage-bar > div { height: 100%; background: #0071e3; }
+  .storage-text { font-size: 12px; color: #6a6a6e; margin-bottom: 14px; text-align: center; }
+  .bar-label { font-size: 12px; color: #1d1d1f; font-weight: 500; margin-top: 6px; }
 </style>
 </head>
 <body>
@@ -350,6 +377,19 @@
   <!-- Окно об обновлении: показывается поверх всего, чтобы его не пролистали
        мимо. Кнопка «Позже» оставлена нарочно - если обновление вдруг не
        ставится, человек не должен оказаться заперт в этом окне. -->
+  <div class="device-menu" id="deviceMenu">
+    <button onclick="showDeviceInfo()">ℹ️ Информация о телефоне</button>
+  </div>
+
+  <div class="modal-back" id="infoModal">
+    <div class="modal-card info-card">
+      <div class="modal-title" id="infoTitle">Телефон</div>
+      <div id="infoStorage"></div>
+      <div id="infoRows" class="info-rows"></div>
+      <button class="modal-btn" onclick="document.getElementById('infoModal').classList.remove('on')">Закрыть</button>
+    </div>
+  </div>
+
   <div class="modal-back" id="updateModal">
     <div class="modal-card">
       <div class="modal-title">Вышло новое обновление</div>
@@ -754,6 +794,56 @@ function addJob(job) {
   return job;
 }
 
+document.addEventListener("click", () => document.getElementById("deviceMenu").classList.remove("on"));
+
+async function showDeviceInfo() {
+  const menu = document.getElementById("deviceMenu");
+  const udid = menu.dataset.udid || activeUdid;
+  menu.classList.remove("on");
+  const modal = document.getElementById("infoModal");
+  document.getElementById("infoTitle").textContent = "Собираю сведения…";
+  document.getElementById("infoRows").innerHTML = "";
+  document.getElementById("infoStorage").innerHTML = "";
+  modal.classList.add("on");
+  const info = await api("GET", "/api/device-info?udid=" + encodeURIComponent(udid || ""));
+  if (!info.ok) {
+    document.getElementById("infoTitle").textContent = "Не получилось";
+    document.getElementById("infoRows").textContent = info.error || "Телефон не ответил";
+    return;
+  }
+  const name = (info.rows.find(r => r.label === "Название") || {}).value || "Телефон";
+  document.getElementById("infoTitle").textContent = name;
+  const st = info.storage || {};
+  const bat = info.battery || {};
+  let head = "";
+  if (st.total) {
+    head += `<div class="bar-label">Память</div>`
+      + `<div class="storage-bar"><div style="width:${Math.min(100, st.percent)}%"></div></div>`
+      + `<div class="storage-text">Занято ${st.used_text} из ${st.total_text} · свободно ${st.free_text}</div>`;
+  }
+  if (bat.health) {
+    // Зелёная полоса, пока батарея здорова; ниже 80% Apple считает её изношенной.
+    const color = bat.health >= 80 ? "#34c759" : (bat.health >= 60 ? "#ff9f0a" : "#ff3b30");
+    head += `<div class="bar-label">Здоровье батареи</div>`
+      + `<div class="storage-bar"><div style="width:${Math.min(100, bat.health)}%; background:${color}"></div></div>`
+      + `<div class="storage-text">${bat.health}% от заводской ёмкости`
+      + (bat.cycles ? ` · ${bat.cycles} циклов зарядки` : "")
+      + (bat.percent != null ? ` · сейчас заряд ${bat.percent}%` : "")
+      + `</div>`;
+  }
+  document.getElementById("infoStorage").innerHTML = head;
+  const box = document.getElementById("infoRows");
+  const shownAsBars = new Set(["Батарея", "Циклов зарядки", "Здоровье батареи", "Название"]);
+  info.rows.filter(r => !shownAsBars.has(r.label)).forEach(r => {
+    const row = document.createElement("div");
+    row.className = "info-row";
+    row.innerHTML = `<span class="k"></span><span class="v"></span>`;
+    row.querySelector(".k").textContent = r.label;
+    row.querySelector(".v").textContent = r.value;
+    box.appendChild(row);
+  });
+}
+
 function updateQueueBadge() {
   const waiting = jobs.filter(j => j.state === "wait" || j.state === "work").length;
   document.getElementById("tabQueue").textContent = waiting ? `Список · ${waiting}` : "Список";
@@ -1044,6 +1134,15 @@ async function loadDevices(attempt = 0) {
       div.innerHTML = `<span class="device-icon">📱</span><div><div>${d.name}</div><div class="device-meta">iOS ${d.ios}</div></div>`;
     }
     div.onclick = () => selectDevice(d.udid);
+    // Правой кнопкой - как принято в системе: маленькое меню у курсора.
+    div.oncontextmenu = (event) => {
+      event.preventDefault();
+      const menu = document.getElementById("deviceMenu");
+      menu.dataset.udid = d.udid;
+      menu.style.left = Math.min(event.clientX, window.innerWidth - 230) + "px";
+      menu.style.top = Math.min(event.clientY, window.innerHeight - 70) + "px";
+      menu.classList.add("on");
+    };
     box.appendChild(div);
   });
   // Опрос продолжается и когда телефон найден: выдернули кабель - строка

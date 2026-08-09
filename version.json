@@ -1,8 +1,8 @@
 {
-  "version": "2026-08-09.83-clear-errors",
-  "notes": "понятные причины ошибок вместо «неизвестной»; значки не мешают скачиванию",
+  "version": "2026-08-09.87-model-name",
+  "notes": "модель и чип телефона по-человечески",
   "sha256": {
-    "server.py": "ddecc4e547e424b6a48afc86492f142c9e4c094c39fc2c70a602955d7e324476",
-    "index.html": "125c41760161f620c04483be6797bc64a6c0422f821db25d0978162caae5d7a2"
+    "server.py": "edb9000fa0567735822941e24f35c41ce4de70261a062e1697c71c13ec3da231",
+    "index.html": "3cd997673ef547adee4cf7c9f9356de4f2403550ef197766b8b0b3e55903edae"
   }
 }

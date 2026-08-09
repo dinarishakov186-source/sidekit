@@ -95,6 +95,16 @@ if IS_WINDOWS and PYTHON_EXE.lower().endswith("pythonw.exe"):
     _console_python = Path(PYTHON_EXE).with_name("python.exe")
     if _console_python.exists():
         PYTHON_EXE = str(_console_python)
+
+# А сама программа должна запускаться БЕЗ консольного окна. Это разные вещи:
+# дочерним процессам нужен python.exe (у pythonw нет вывода), а самому SideKit
+# нужен pythonw.exe - иначе при перезапуске на обновлении вылезает чёрное окно
+# с текстом, которого раньше не было.
+GUI_PYTHON_EXE = sys.executable
+if IS_WINDOWS and GUI_PYTHON_EXE.lower().endswith("python.exe"):
+    _windowless_python = Path(GUI_PYTHON_EXE).with_name("pythonw.exe")
+    if _windowless_python.exists():
+        GUI_PYTHON_EXE = str(_windowless_python)
 LOCK_FILE = LOCK_DIR / "server.lock"
 
 # Bump this any time server.py changes in a way that matters. It's how a
@@ -104,7 +114,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-08-07.67-version-line"
+SERVER_VERSION = "2026-08-07.69-no-console"
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +337,10 @@ def switch_python_if_needed() -> None:
     if not better or Path(better).resolve() == Path(sys.executable).resolve():
         return
     os.environ["SIDEKIT_PYSWITCH"] = "1"
+    if IS_WINDOWS and better.lower().endswith("python.exe"):
+        windowless = Path(better).with_name("pythonw.exe")
+        if windowless.exists():
+            better = str(windowless)
     try:
         os.execv(better, [better, os.path.abspath(__file__)] + sys.argv[1:])
     except Exception:
@@ -2364,24 +2378,30 @@ def cancel_install() -> dict:
     return {"ok": True}
 
 
-_VERIFY_INSTALL_SCRIPT = """
-import json, sys
+_VERIFY_INSTALL_SCRIPT = r'''
+import asyncio, inspect, json, sys
 from pymobiledevice3.lockdown import create_using_usbmux
 from pymobiledevice3.services.installation_proxy import InstallationProxyService
 
-udid = sys.argv[1] or None
-bundle_id = sys.argv[2]
-lockdown = create_using_usbmux(serial=udid)
-proxy = InstallationProxyService(lockdown)
-# Спрашиваем ровно про одно приложение и только нужные поля: полный обход
-# каталога на больших телефонах долгий и незачем.
-found = proxy.lookup(options={
-    "BundleIDs": [bundle_id],
-    "ReturnAttributes": ["CFBundleIdentifier", "CFBundleShortVersionString", "CFBundleVersion"],
-})
-info = (found or {}).get(bundle_id)
-print(json.dumps({"installed": bool(info), "info": info or {}}, ensure_ascii=False))
-"""
+async def main():
+    udid = sys.argv[1] or None
+    bundle_id = sys.argv[2]
+    lockdown = create_using_usbmux(serial=udid) if udid else create_using_usbmux()
+    if inspect.iscoroutine(lockdown):
+        lockdown = await lockdown
+    proxy = InstallationProxyService(lockdown)
+    # Спрашиваем ровно про одно приложение и только нужные поля.
+    found = proxy.lookup(options={
+        "BundleIDs": [bundle_id],
+        "ReturnAttributes": ["CFBundleIdentifier", "CFBundleShortVersionString", "CFBundleVersion"],
+    })
+    if inspect.iscoroutine(found):
+        found = await found
+    info = (found or {}).get(bundle_id)
+    print(json.dumps({"installed": bool(info), "info": info or {}}, ensure_ascii=False))
+
+asyncio.run(main())
+'''
 
 
 def bundle_id_of_ipa(ipa_path: str) -> str | None:
@@ -3261,7 +3281,7 @@ def adopt_update_if_ready() -> None:
     os.environ["SIDEKIT_UPDATED"] = "1"
     os.environ["SIDEKIT_HOME"] = str(RESOURCES_DIR)
     try:
-        os.execv(PYTHON_EXE, [PYTHON_EXE, str(candidate)] + sys.argv[1:])
+        os.execv(GUI_PYTHON_EXE, [GUI_PYTHON_EXE, str(candidate)] + sys.argv[1:])
     except Exception:
         pass                        # не вышло - работаем как есть
 
@@ -3330,6 +3350,10 @@ def restart_with_python(exe: str) -> None:
             pass
         os.environ["SIDEKIT_PYSWITCH"] = "1"
         os.environ["SIDEKIT_HOME"] = str(RESOURCES_DIR)
+        if IS_WINDOWS and exe.lower().endswith("python.exe"):
+            windowless = Path(exe).with_name("pythonw.exe")
+            if windowless.exists():
+                exe = str(windowless)
         args = [exe, os.path.abspath(__file__), "--port", str(_server_port)]
         try:
             os.execv(exe, args)
@@ -3356,9 +3380,9 @@ def apply_update_now() -> dict:
             pass
         os.environ["SIDEKIT_UPDATED"] = "1"
         os.environ["SIDEKIT_HOME"] = str(RESOURCES_DIR)
-        args = [PYTHON_EXE, str(candidate), "--port", str(_server_port)]
+        args = [GUI_PYTHON_EXE, str(candidate), "--port", str(_server_port)]
         try:
-            os.execv(PYTHON_EXE, args)
+            os.execv(GUI_PYTHON_EXE, args)
         except Exception:
             subprocess.Popen(args, **NO_CONSOLE)
             os._exit(0)
@@ -3476,55 +3500,61 @@ def _reachable(url: str) -> str:
         return "НЕДОСТУПЕН — " + str(e)[:120]
 
 
-_DIAGNOSE_SCRIPT = """
-import json, sys
-out = {}
-try:
-    # В свежих версиях библиотеки перечисление устройств асинхронное,
-    # поэтому его нужно прогонять через цикл событий, а не звать напрямую.
-    import asyncio, inspect
-    from pymobiledevice3.usbmux import list_devices
-    devices = list_devices()
-    if inspect.iscoroutine(devices):
-        devices = asyncio.run(devices)
-    devices = list(devices)
-    out["usbmux"] = {"ok": True, "count": len(devices),
-                     "serials": [getattr(d, "serial", "?") for d in devices][:5]}
-except Exception as e:
-    out["usbmux"] = {"ok": False, "error": type(e).__name__ + ": " + str(e)[:180]}
+_DIAGNOSE_SCRIPT = r'''
+import asyncio, inspect, json, sys
 
-serial = sys.argv[1] or None
-if not serial and out.get("usbmux", {}).get("serials"):
-    serial = out["usbmux"]["serials"][0]
-
-if serial:
+async def main():
+    out = {}
     try:
-        from pymobiledevice3.lockdown import create_using_usbmux
-        lockdown = create_using_usbmux(serial=serial)
-        out["trust"] = {"ok": True}
-        out["ios"] = {"ok": True, "version": lockdown.product_version,
-                      "model": lockdown.product_type,
-                      "name": lockdown.short_info.get("DeviceName", "")}
-        try:
-            from pymobiledevice3.services.installation_proxy import InstallationProxyService
-            proxy = InstallationProxyService(lockdown)
-            # calculate_sizes=False принципиально: подсчёт размеров на телефоне
-            # с сотнями приложений может тянуться минутами.
-            apps = proxy.get_apps(application_type="User", calculate_sizes=False)
-            out["installation_proxy"] = {"ok": True, "count": len(apps)}
-        except Exception as e:
-            out["installation_proxy"] = {"ok": False, "error": str(e)[:200]}
+        from pymobiledevice3.usbmux import list_devices
+        devices = list_devices()
+        if inspect.iscoroutine(devices):
+            devices = await devices
+        devices = list(devices)
+        out["usbmux"] = {"ok": True, "count": len(devices),
+                         "serials": [getattr(d, "serial", "?") for d in devices][:5]}
     except Exception as e:
-        message = str(e)[:200]
-        paired = "pair" not in message.lower() and "trust" not in message.lower()
-        out["trust"] = {"ok": False, "error": message, "needs_trust": not paired}
-        out["ios"] = {"ok": False, "error": "не дошли до этого шага"}
-        out["installation_proxy"] = {"ok": False, "error": "не дошли до этого шага"}
-else:
-    for key in ("trust", "ios", "installation_proxy"):
-        out[key] = {"ok": False, "error": "телефон не найден"}
-print(json.dumps(out, ensure_ascii=False))
-"""
+        out["usbmux"] = {"ok": False, "error": type(e).__name__ + ": " + str(e)[:180]}
+
+    serial = sys.argv[1] or None
+    if not serial and out.get("usbmux", {}).get("serials"):
+        serial = out["usbmux"]["serials"][0]
+
+    if serial:
+        try:
+            from pymobiledevice3.lockdown import create_using_usbmux
+            lockdown = create_using_usbmux(serial=serial)
+            if inspect.iscoroutine(lockdown):
+                lockdown = await lockdown
+            out["trust"] = {"ok": True}
+            out["ios"] = {"ok": True, "version": lockdown.product_version,
+                          "model": lockdown.product_type,
+                          "name": (lockdown.short_info or {}).get("DeviceName", "")}
+            try:
+                from pymobiledevice3.services.installation_proxy import InstallationProxyService
+                proxy = InstallationProxyService(lockdown)
+                # calculate_sizes=False принципиально: подсчёт размеров на
+                # телефоне с сотнями приложений тянется минутами.
+                apps = proxy.get_apps(application_type="User", calculate_sizes=False)
+                if inspect.iscoroutine(apps):
+                    apps = await apps
+                out["installation_proxy"] = {"ok": True, "count": len(apps)}
+            except Exception as e:
+                out["installation_proxy"] = {"ok": False, "error": str(e)[:200]}
+        except Exception as e:
+            message = str(e)[:200]
+            lowered = message.lower()
+            out["trust"] = {"ok": False, "error": message,
+                            "needs_trust": ("pair" in lowered or "trust" in lowered)}
+            out["ios"] = {"ok": False, "error": "не дошли до этого шага"}
+            out["installation_proxy"] = {"ok": False, "error": "не дошли до этого шага"}
+    else:
+        for key in ("trust", "ios", "installation_proxy"):
+            out[key] = {"ok": False, "error": "телефон не найден"}
+    print(json.dumps(out, ensure_ascii=False))
+
+asyncio.run(main())
+'''
 
 
 def diagnose(udid: str | None = None) -> dict:
@@ -3535,26 +3565,37 @@ def diagnose(udid: str | None = None) -> dict:
     def add(name, ok, detail):
         steps.append({"name": name, "ok": bool(ok), "detail": str(detail)[:400]})
 
-    # 1. драйвер Apple
-    if IS_WINDOWS:
-        try:
-            service = subprocess.run(["sc", "query", "Apple Mobile Device Service"],
-                                     capture_output=True, text=True, timeout=25, **NO_CONSOLE)
-            running = "RUNNING" in (service.stdout or "").upper()
-            add("Драйвер Apple", running,
-                "служба работает" if running else
-                ("служба есть, но остановлена" if service.returncode == 0
-                 else "НЕ УСТАНОВЛЕН — поставь Apple Devices из Microsoft Store"))
-        except Exception as e:
-            add("Драйвер Apple", False, "не удалось проверить: " + str(e)[:120])
-    else:
-        socket_exists = Path("/var/run/usbmuxd").exists()
-        add("Драйвер Apple", True,
-            "в macOS встроен" + ("" if socket_exists else " (сокет usbmuxd не найден, но это норма до подключения)"))
-
-    # 2-5. то, что можно узнать только у самого телефона
+    # Сначала спрашиваем телефон: если он отвечает, значит драйвер на месте,
+    # как бы ни называлась служба. Ругаться на название службы, когда всё
+    # работает, - худший вид ложной тревоги.
     answer = _run_device_script(_DIAGNOSE_SCRIPT, udid, timeout=120) or {}
     usbmux = answer.get("usbmux") or {}
+    phone_visible = bool(usbmux.get("ok") and usbmux.get("count"))
+
+    if IS_WINDOWS:
+        detail, ok = "", phone_visible
+        if phone_visible:
+            detail = "работает (телефон виден)"
+        else:
+            found_service = ""
+            for name in ("Apple Mobile Device Service", "AppleMobileDeviceService",
+                         "Apple Mobile Device Process"):
+                try:
+                    service = subprocess.run(["sc", "query", name], capture_output=True,
+                                             text=True, timeout=20, **NO_CONSOLE)
+                    if service.returncode == 0:
+                        found_service = name + (" — работает" if "RUNNING" in service.stdout.upper()
+                                                else " — остановлена")
+                        ok = "RUNNING" in service.stdout.upper()
+                        break
+                except Exception:
+                    pass
+            detail = found_service or ("служба Apple не найдена — поставь «Apple Devices» "
+                                       "из Microsoft Store и подключи телефон кабелем")
+        add("Драйвер Apple", ok, detail)
+    else:
+        add("Драйвер Apple", True, "в macOS встроен")
+
     add("usbmux (видит ли компьютер телефон)", usbmux.get("ok") and usbmux.get("count"),
         ("найдено устройств: " + str(usbmux.get("count"))) if usbmux.get("ok") and usbmux.get("count")
         else ("телефон не подключён или кабель только для зарядки" if usbmux.get("ok")

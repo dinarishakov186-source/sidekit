@@ -441,7 +441,15 @@ async function api(method, path, body) {
     opts.body = JSON.stringify(body);
   }
   const res = await fetch(path, opts);
-  return res.json();
+  const data = await res.json();
+  if (!res.ok && data && data.trace) {
+    // Сбой внутри программы: показываем понятную причину, а подробности
+    // уже записаны и уедут в отчёт.
+    const first = String(data.trace).trim().split("\n").pop();
+    data.error = (data.error || "внутренняя ошибка") + " — " + first
+      + ". Нажми «Сообщить об ошибке» и пришли файл.";
+  }
+  return data;
 }
 
 function showMsg(el, text, kind) {

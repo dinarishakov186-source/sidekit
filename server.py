@@ -114,7 +114,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-08-07.72-selfheal"
+SERVER_VERSION = "2026-08-09.73-error500"
 
 
 # ---------------------------------------------------------------------------
@@ -3039,6 +3039,9 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._send_json({"error": "not found"}, status=404)
         except Exception as e:
+            # Такая ошибка обязана попадать в отчёт: иначе «ошибка 500» так и
+            # остаётся загадкой, а причина есть прямо здесь.
+            remember_error(self.path.split("?")[0], traceback.format_exc())
             self._send_json({"error": str(e), "trace": traceback.format_exc()}, status=500)
 
     def do_POST(self):
@@ -3113,6 +3116,9 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._send_json({"error": "not found"}, status=404)
         except Exception as e:
+            # Такая ошибка обязана попадать в отчёт: иначе «ошибка 500» так и
+            # остаётся загадкой, а причина есть прямо здесь.
+            remember_error(self.path.split("?")[0], traceback.format_exc())
             self._send_json({"error": str(e), "trace": traceback.format_exc()}, status=500)
 
 

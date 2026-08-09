@@ -1,8 +1,8 @@
 {
-  "version": "2026-08-07.72-selfheal",
-  "notes": "обновление само вселяется в папку программы",
+  "version": "2026-08-09.73-error500",
+  "notes": "внутренние сбои попадают в отчёт и показываются понятной строкой",
   "sha256": {
-    "server.py": "d684c58c95192ac709a9bc1ec6e9bbc42950a03abc92ccb79af0cba1ba03f3d3",
-    "index.html": "095dba9874dc930c23516f33fd4dda8a441f2f7cd739d9e2b1cfda0ef6990d00"
+    "server.py": "e630c4dded42ea4d547e1c294e79e27c4d00183d24157aa1d61279007aa99db6",
+    "index.html": "e7d348212433be89a6c7cc3e7e8a860f99d306792cb5e5b7704d5ff98160cecb"
   }
 }

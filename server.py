@@ -114,7 +114,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-08-10.91-safe-swap"
+SERVER_VERSION = "2026-08-10.97-rollback"
 
 
 # ---------------------------------------------------------------------------
@@ -1024,11 +1024,25 @@ def ipatool_login(email: str, password: str, auth_code: str | None, force: bool 
     # код. Свежий ipatool сам выбирает, на какой сервер Apple идти, и порой
     # выбирает не тот. Пробуем ещё раз, а потом - запасной ipatool постарше,
     # который ходит по постоянному адресу.
+    def looks_like_crash(text: str) -> bool:
+        # Не ответ Apple, а падение самой программы: дамп горутин и регистров.
+        low = (text or "").lower()
+        return any(marker in low for marker in (
+            "goroutine", "runtime.goexit", "fatal error:", "panic:", "signal sig"))
+
     def looks_like_apple_block(text: str) -> bool:
         # Apple может ответить и 403, и 404 - в обоих случаях дело не в пароле,
         # а в том, что свежий ipatool стучится не туда.
         low = text.lower()
         return "unexpected response from apple" in low
+
+    if looks_like_crash((out or "") + (err or "")):
+        remember_error("вход в Apple ID", "ipatool упал: " + ((err or out) or "")[:300])
+        spare = ensure_legacy_ipatool()
+        if spare and str(spare) != tool:
+            rc, out, err = run(build_cmd(str(spare)), timeout=120)
+            if not looks_like_crash((out or "") + (err or "")):
+                remember_ipatool_choice(True)   # дальше работаем запасным
 
     if looks_like_apple_block((out or "") + (err or "")):
         remember_error("вход в Apple ID", "Apple отказала: " + ((err or out) or "")[:200])
@@ -2465,7 +2479,12 @@ def confirm_installed_on_phone(ipa_path: str, udid: str | None) -> tuple:
     ошибки, а приложение так и не появиться."""
     bundle_id = bundle_id_of_ipa(ipa_path)
     if not bundle_id:
-        return True, "не удалось прочитать идентификатор из файла — пропускаю сверку"
+        # Такое бывает, если к файлу нет доступа (например, macOS не пустила к
+        # папке). Молчать нельзя: иначе «установлено» написано без проверки.
+        remember_error("подтверждение установки",
+                       "не удалось прочитать идентификатор из " + str(ipa_path)
+                       + " — сверка с телефоном пропущена")
+        return True, "идентификатор из файла не прочитался — сверка пропущена"
     for attempt in range(6):                 # телефону нужно немного времени
         answer = _run_device_script(_VERIFY_INSTALL_SCRIPT, udid, timeout=90,
                                     extra_args=[bundle_id])
@@ -3500,6 +3519,72 @@ def heal_installed_copy() -> None:
         pass
 
 
+BOOT_MARK = LOCK_DIR / "boot_attempt.json"
+PREV_DIR = LOCK_DIR / "previous"
+
+
+def keep_previous_version() -> None:
+    """Прячет нынешнюю рабочую версию про запас - на случай, если следующая
+    окажется негодной. Обновления доезжают до трёх компьютеров сразу, и
+    возможность вернуться назад важнее лишних десяти мегабайт на диске."""
+    try:
+        PREV_DIR.mkdir(parents=True, exist_ok=True)
+        for name in ("server.py", "index.html"):
+            source = RESOURCES_DIR / name
+            if source.exists():
+                shutil.copy2(source, PREV_DIR / name)
+    except Exception:
+        pass
+
+
+def note_boot_attempt() -> None:
+    """Отмечает, что версия начала запускаться. Метка снимается, когда окно
+    уже отвечает; если она осталась - значит прошлый запуск не дожил."""
+    try:
+        LOCK_DIR.mkdir(parents=True, exist_ok=True)
+        BOOT_MARK.write_text(json.dumps({"version": SERVER_VERSION, "at": time.time()}),
+                             encoding="utf-8")
+    except Exception:
+        pass
+
+
+def clear_boot_attempt() -> None:
+    try:
+        BOOT_MARK.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def rollback_if_last_boot_failed() -> None:
+    """Если прошлый запуск этой же версии не дошёл до рабочего состояния -
+    возвращаем предыдущую. Иначе неудачное обновление превращается в
+    программу, которая больше не открывается, и починить её некому."""
+    try:
+        if not BOOT_MARK.exists():
+            return
+        mark = json.loads(BOOT_MARK.read_text(encoding="utf-8"))
+        if mark.get("version") != SERVER_VERSION:
+            clear_boot_attempt()
+            return
+        previous = PREV_DIR / "server.py"
+        if not previous.exists() or _version_of(previous) >= SERVER_VERSION:
+            clear_boot_attempt()
+            return
+        remember_error("откат", "версия " + SERVER_VERSION + " не запустилась, "
+                       "возвращаю " + _version_of(previous))
+        target = RESOURCES_DIR if os.access(str(RESOURCES_DIR), os.W_OK) else UPDATE_DIR
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(previous, target / "server.py")
+        page = PREV_DIR / "index.html"
+        if page.exists():
+            shutil.copy2(page, target / "index.html")
+        clear_boot_attempt()
+        os.environ["SIDEKIT_ROLLED_BACK"] = "1"
+        os.execv(GUI_PYTHON_EXE, [GUI_PYTHON_EXE, str(target / "server.py")] + sys.argv[1:])
+    except Exception:
+        clear_boot_attempt()
+
+
 def adopt_update_if_ready() -> None:
     """Если рядом лежит скачанная версия свежее нынешней - запускаемся из неё.
     Она уже прошла проверку запуском при скачивании."""
@@ -3527,6 +3612,7 @@ def adopt_update_if_ready() -> None:
     except Exception:
         pass                        # не вышло - едем прежним путём
 
+    keep_previous_version()
     os.environ["SIDEKIT_UPDATED"] = "1"
     os.environ["SIDEKIT_HOME"] = str(RESOURCES_DIR)
     try:
@@ -3658,11 +3744,26 @@ LEGACY_NAME = "ipatool-legacy.exe" if IS_WINDOWS else "ipatool-legacy"
 IPATOOL_CHOICE_FILE = LOCK_DIR / "ipatool_choice.txt"
 
 
-def preferred_ipatool_is_legacy() -> bool:
+def old_macos() -> bool:
+    """macOS 10.15 и старше. Свежий ipatool на таких системах падает прямо
+    внутри шифрования при входе - выкидывает дамп вместо запроса кода."""
+    if not IS_MAC:
+        return False
     try:
-        return IPATOOL_CHOICE_FILE.read_text(encoding="utf-8").strip() == "legacy"
+        parts = [int(x) for x in platform.mac_ver()[0].split(".")[:2] if x.isdigit()]
+        return bool(parts) and parts[0] < 11
     except Exception:
         return False
+
+
+def preferred_ipatool_is_legacy() -> bool:
+    try:
+        choice = IPATOOL_CHOICE_FILE.read_text(encoding="utf-8").strip()
+        if choice in ("legacy", "main"):
+            return choice == "legacy"
+    except Exception:
+        pass
+    return old_macos()          # на старых Маках сразу берём проверенный
 
 
 def remember_ipatool_choice(use_legacy: bool) -> None:
@@ -3687,13 +3788,54 @@ def active_ipatool() -> str | None:
     return str(tool) if tool else None
 
 
+LEGACY_MIN_VERSION = (2, 3, 0)
+
+
+def _tool_version_tuple(path: Path) -> tuple:
+    """Версия ipatool числами. Нужна, чтобы отличить годный запасной от
+    устаревшего: 2.2.0 уже не разбирает ответ Apple («unexpected hex digit»)."""
+    try:
+        result = subprocess.run([str(path), "--version"], capture_output=True,
+                                text=True, timeout=30, **NO_CONSOLE)
+        text = (result.stdout or result.stderr or "")
+        found = re.search(r"(\d+)\.(\d+)\.(\d+)", text)
+        return tuple(int(x) for x in found.groups()) if found else (0, 0, 0)
+    except Exception:
+        return (0, 0, 0)
+
+
+def _binary_runs(path: Path) -> bool:
+    """Проверка запуском. Файл может быть на месте, но не для этого
+    процессора - тогда система отвечает «Bad CPU type», и толку от него нет."""
+    try:
+        result = subprocess.run([str(path), "--version"], capture_output=True,
+                                timeout=30, **NO_CONSOLE)
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 def legacy_ipatool() -> Path | None:
-    """Запасной ipatool 2.2.0. Он ходит к Apple по постоянному адресу, и
-    выручает, когда свежий получает от Apple 404 при вводе кода."""
+    """Запасной ipatool 2.3.0. Выручает, когда свежий получает от Apple отказ
+    или падает - так бывает на старых macOS."""
     for folder in (USER_BIN_DIR, BIN_DIR):
         candidate = folder / LEGACY_NAME
-        if candidate.exists():
-            return candidate
+        if not candidate.exists():
+            continue
+        if not _binary_runs(candidate):
+            continue
+        if _tool_version_tuple(candidate) < LEGACY_MIN_VERSION:
+            # Слишком старый: запускается, но ответ Apple уже не понимает.
+            # Убираем, чтобы на его место скачался годный.
+            remember_error("запасной ipatool",
+                           "версия " + ".".join(str(x) for x in _tool_version_tuple(candidate))
+                           + " устарела — заменяю")
+            try:
+                candidate.unlink()
+            except OSError:
+                pass
+            continue
+        return candidate
     return None
 
 
@@ -3705,8 +3847,11 @@ def ensure_legacy_ipatool() -> Path | None:
         return existing
     system = "windows" if IS_WINDOWS else "macos"
     arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "amd64"
-    url = ("https://github.com/majd/ipatool/releases/download/v2.2.0/"
-           f"ipatool-2.2.0-{system}-{arch}.tar.gz")
+    # 2.3.0 - последняя версия, которая ещё запускается на старых macOS и уже
+    # понимает нынешние ответы Apple. 2.3.2 там падает внутри шифрования,
+    # а 2.2.0 не разбирает ответ («unexpected hex digit»).
+    url = ("https://github.com/majd/ipatool/releases/download/v2.3.0/"
+           f"ipatool-2.3.0-{system}-{arch}.tar.gz")
     try:
         import io, tarfile
         data = _fetch(url, timeout=120)
@@ -4317,6 +4462,8 @@ def main():
         print("SideKit " + SERVER_VERSION + " — самопроверка пройдена")
         return
 
+    rollback_if_last_boot_failed()
+    note_boot_attempt()
     adopt_update_if_ready()
     heal_installed_copy()
     # Скачанную копию убираем только тогда, когда установленная папка уже
@@ -4377,6 +4524,9 @@ def main():
             time.sleep(1800)
 
     threading.Thread(target=background_chores, daemon=True).start()
+
+    # Дошли до рабочего состояния - значит версия годная, метку снимаем.
+    clear_boot_attempt()
 
     port = server.server_address[1]
     global _server, _server_port

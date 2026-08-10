@@ -59,11 +59,11 @@ def _resources_dir() -> Path:
     if told and Path(told).is_dir():
         return Path(told)
     here = Path(__file__).resolve().parent
-    if (here / "bin").is_dir() or (here / "index.html").exists():
-        return here
+    if (here / "bin").is_dir():
+        return here                  # настоящая папка программы - с ipatool внутри
     for known in (Path("/Applications/SideKit.app/Contents/Resources"),
                   Path(os.environ.get("LOCALAPPDATA", "")) / "SideKit"):
-        if (known / "index.html").exists():
+        if (known / "bin").is_dir() or (known / "index.html").exists():
             return known
     return here
 
@@ -114,7 +114,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-08-09.88-old-mac"
+SERVER_VERSION = "2026-08-10.91-safe-swap"
 
 
 # ---------------------------------------------------------------------------
@@ -431,11 +431,19 @@ def pip_install_pymobiledevice3(log: list) -> bool:
     package = str(wheel) if wheel else "pymobiledevice3==" + PMD3_VERSION
     if not wheel:
         log.append("Ставлю закреплённую версию " + PMD3_VERSION + " обычным способом.")
+    # --prefer-binary и запрет сборки для cryptography/cffi: на старых Маках
+    # pip выбирал версию без готового файла и лез собирать её из исходников,
+    # для чего нужен компилятор Rust. Готовые файлы под эти системы есть,
+    # надо лишь запретить pip выбирать те, которых нет.
     cmd = [
         target, "-m", "pip", "install", "--user",
-        "--upgrade", "--force-reinstall", "--no-cache-dir", package,
+        "--upgrade", "--force-reinstall", "--no-cache-dir",
+        "--prefer-binary", "--only-binary=cryptography,cffi", package,
     ]
     rc, out, err = run(cmd, timeout=900)
+    if rc != 0 and "only-binary" not in (err or ""):
+        log.append("Пробую ещё раз, разрешив сборку из исходников...")
+        rc, out, err = run([c for c in cmd if not c.startswith("--only-binary")], timeout=900)
     if rc != 0 and "externally-managed-environment" in err:
         log.append("Повторяю установку с --break-system-packages...")
         rc, out, err = run(cmd + ["--break-system-packages"], timeout=300)
@@ -3567,8 +3575,17 @@ def check_for_updates() -> None:
         if check.returncode != 0:
             shutil.rmtree(staging, ignore_errors=True)
             return
-        shutil.rmtree(UPDATE_DIR, ignore_errors=True)
+        # Сначала новое кладём рядом, потом убираем старое: если программу
+        # прервать между этими шагами, копия обновления не исчезнет совсем.
+        previous = LOCK_DIR / "update.old"
+        shutil.rmtree(previous, ignore_errors=True)
+        if UPDATE_DIR.exists():
+            try:
+                UPDATE_DIR.replace(previous)
+            except Exception:
+                shutil.rmtree(UPDATE_DIR, ignore_errors=True)
         staging.replace(UPDATE_DIR)
+        shutil.rmtree(previous, ignore_errors=True)
         _update_note = {"available": True, "version": latest,
                         "notes": str(info.get("notes", ""))}
     except Exception:
@@ -4302,10 +4319,13 @@ def main():
 
     adopt_update_if_ready()
     heal_installed_copy()
-    # Отработавшую папку обновления убираем: если она старше нас, толку от
-    # неё нет, а окно рискует показывать оттуда прошлый интерфейс.
+    # Скачанную копию убираем только тогда, когда установленная папка уже
+    # обновилась. На Маке в /Applications без администратора не записать, и
+    # если удалить копию просто потому, что мы из неё запущены, следующий
+    # запуск снова стартует со старой версии и качает всё заново - по кругу.
     try:
-        if (UPDATE_DIR / "server.py").exists() and _version_of(UPDATE_DIR / "server.py") <= SERVER_VERSION:
+        staged = UPDATE_DIR / "server.py"
+        if staged.exists() and _version_of(RESOURCES_DIR / "server.py") >= _version_of(staged):
             shutil.rmtree(UPDATE_DIR, ignore_errors=True)
     except Exception:
         pass

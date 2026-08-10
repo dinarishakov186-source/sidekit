@@ -1,8 +1,8 @@
 {
-  "version": "2026-08-09.88-old-mac",
-  "notes": "окно сведений корректно на старых Маках",
+  "version": "2026-08-10.91-safe-swap",
+  "notes": "обновление не теряется при обрыве; надёжнее определяется папка программы",
   "sha256": {
-    "server.py": "31854fae417eee2ed03d5fcce4a888831b8c90a65605c5b51dbf50396b0ff86b",
+    "server.py": "1c733188ac7e3489721aba896c40da7b37cd48f4621df76fa68f934757056329",
     "index.html": "8a65998f8c7cceec4f383bc1c89e334ddba30000e03505849f1ceedde5b696b0"
   }
 }

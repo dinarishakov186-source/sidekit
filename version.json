@@ -1,8 +1,8 @@
 {
-  "version": "2026-08-11.106-shared-db",
-  "notes": "общая база App Store ID: подмешивается сама, своя выгружается кнопкой",
+  "version": "2026-08-11.109-fix-ui",
+  "notes": "починен интерфейс: он не выполнялся из-за моей ошибки в правке",
   "sha256": {
-    "server.py": "8d900355a235aa238c1b76d947ce2ff9ae548b41fd8d010393850af16a4fca19",
-    "index.html": "43315a8490db4eae01dfc4f9c6caf4e6f17c2c0f947a66471ba059b8f6a00da7"
+    "server.py": "2ca5d0d1942d0aa71b7a8314953507769051e3a4e3bec13fed53ea746fb9fab3",
+    "index.html": "1156cd3f6ff42b02b6f751d39c323986f6f392ed8a61fd858de9c9725057afd4"
   }
 }

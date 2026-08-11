@@ -114,7 +114,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-08-11.106-shared-db"
+SERVER_VERSION = "2026-08-11.109-fix-ui"
 
 
 # ---------------------------------------------------------------------------
@@ -3365,6 +3365,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(apply_update_now())
             elif path == "/api/report":
                 self._send_json(start_report())
+            elif path == "/api/sync-db":
+                self._send_json(sync_apps_db())
             elif path == "/api/export-db":
                 self._send_json(export_apps_db())
             elif path == "/api/enable-wifi":
@@ -3693,6 +3695,71 @@ def adopt_update_if_ready() -> None:
         os.execv(GUI_PYTHON_EXE, [GUI_PYTHON_EXE, str(candidate)] + sys.argv[1:])
     except Exception:
         pass                        # не вышло - работаем как есть
+
+
+# Общая база на своём сервере: программы сами отправляют туда найденные номера
+# приложений и забирают чужие. Ключ лежит здесь же - он защищает не тайну (в
+# базе только общедоступные номера из App Store), а от случайного мусора извне.
+DB_SYNC_URL = "http://195.19.7.162:8900/db"
+DB_SYNC_TOKEN = "7_aR8EoQKVYR-Ok6QpS_QVAvPk5zz5iTrJA9hhPEQFg"
+DB_SYNC_FILE = LOCK_DIR / "db_sync.json"
+
+
+def db_sync_settings() -> tuple:
+    """Адрес и ключ. Лежат в файле, если нужно поменять без пересборки."""
+    url, token = DB_SYNC_URL, DB_SYNC_TOKEN
+    try:
+        if DB_SYNC_FILE.exists():
+            saved = json.loads(DB_SYNC_FILE.read_text(encoding="utf-8"))
+            url = saved.get("url") or url
+            token = saved.get("token") or token
+    except Exception:
+        pass
+    return url, token
+
+
+def sync_apps_db() -> dict:
+    """Отправляет свою базу на общий сервер и забирает общую. Обмен в одну
+    ходку: сервер сливает присланное со своим и сразу возвращает итог."""
+    if _download_state.get("running") or _install_state.get("running") or _login_running:
+        return {"ok": False, "skipped": True}
+    url, token = db_sync_settings()
+    if not url or not token:
+        return {"ok": False, "error": "не настроено"}
+    mine = load_known_apps() or {}
+    try:
+        import urllib.request
+        request = urllib.request.Request(
+            url, data=json.dumps({"apps": mine}, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-Token": token,
+                     "User-Agent": "SideKit"}, method="POST")
+        with urllib.request.urlopen(request, timeout=60, context=_https_context()) as answer:
+            reply = json.loads(answer.read().decode("utf-8", "replace"))
+    except Exception as e:
+        remember_error("общая база", str(e)[:200])
+        return {"ok": False, "error": str(e)[:200]}
+
+    theirs = reply.get("apps") if isinstance(reply, dict) else None
+    added = 0
+    if isinstance(theirs, dict):
+        for bundle_id, entry in theirs.items():
+            if not isinstance(entry, dict):
+                continue
+            ours = mine.get(bundle_id)
+            if not isinstance(ours, dict):
+                mine[bundle_id] = dict(entry)
+                added += 1
+                continue
+            if not ours.get("item_id") and entry.get("item_id"):
+                ours["item_id"] = entry["item_id"]
+                ours.pop("no_store_id", None)
+                added += 1
+            if (not ours.get("name") or ours.get("name") == bundle_id) and entry.get("name"):
+                ours["name"] = entry["name"]
+        if added:
+            save_known_apps(mine)
+    return {"ok": True, "отправлено": len(mine), "принято новых": added,
+            "всего на сервере": reply.get("count")}
 
 
 def merge_shared_apps_db() -> int:
@@ -4717,6 +4784,15 @@ def main():
     shut_down_stale_instance()
 
     wanted_port = 0
+    # Если окно уже открыто, оно стучится по прежнему адресу. Стараемся занять
+    # тот же порт, что и в прошлый раз - тогда после перезапуска движка окно
+    # продолжает работать, а не смотрит в пустоту.
+    try:
+        previous = json.loads(LOCK_FILE.read_text(encoding="utf-8")).get("port")
+        if isinstance(previous, int) and 1024 < previous < 65536:
+            wanted_port = previous
+    except Exception:
+        pass
     if "--port" in sys.argv:
         try:
             wanted_port = int(sys.argv[sys.argv.index("--port") + 1])
@@ -4738,7 +4814,11 @@ def main():
         while True:
             check_for_updates()
             try:
-                merge_shared_apps_db()
+                merge_shared_apps_db()      # запасной путь - файл в хранилище
+            except Exception:
+                pass
+            try:
+                sync_apps_db()              # основной путь - свой сервер
             except Exception:
                 pass
             time.sleep(1800)

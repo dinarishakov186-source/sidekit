@@ -114,7 +114,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-08-10.97-rollback"
+SERVER_VERSION = "2026-08-11.106-shared-db"
 
 
 # ---------------------------------------------------------------------------
@@ -981,6 +981,9 @@ def suspicious_login(email: str) -> str:
     return ""
 
 
+_login_running = False
+
+
 def ipatool_login(email: str, password: str, auth_code: str | None, force: bool = False) -> dict:
     tool = active_ipatool()
     if not tool:
@@ -1004,6 +1007,8 @@ def ipatool_login(email: str, password: str, auth_code: str | None, force: bool 
         if doubt:
             return {"ok": False, "confirm_login": True, "error": doubt}
 
+    global _login_running
+    _login_running = True
     prepare_keychain_slot()
 
     def build_cmd(binary: str) -> list:
@@ -1077,6 +1082,7 @@ def ipatool_login(email: str, password: str, auth_code: str | None, force: bool 
         error_text = str(parsed.get("error", ""))
         break
 
+    _login_running = False
     lowered = (combined + " " + error_text).lower()
 
     # Неверный пароль Apple отдаёт вместе с упоминанием проверочного кода,
@@ -1185,7 +1191,8 @@ APPLE_ERROR_HINTS = (
     ("dial tcp", "Не получилось достучаться до Apple — проверь интернет и попробуй ещё раз."),
     ("timeout", "Apple не ответила вовремя. Попробуй ещё раз."),
     ("app not found", "Этого приложения больше нет в каталоге App Store — Apple его не отдаёт."),
-    ("license", "Apple говорит, что это приложение не покупалось этим Apple ID."),
+    ("license", "Apple не выдаёт это приложение: его убрали из каталога, а этот "
+                "Apple ID его раньше не скачивал. Поможет только файл .ipa."),
     ("403", "Apple отказала в доступе. Попробуй ещё раз через минуту."),
     ("429", "Слишком часто обращались к Apple. Подожди пару минут."),
 )
@@ -2335,12 +2342,25 @@ def list_devices() -> dict:
     # sync (even ones that used to be connected and are just on the same
     # network now), which is not what "what's plugged in" should mean here.
     rc_simple, out_simple, err_simple = pmd3("usbmux", "list", "--simple", "--usb", timeout=15)
-    udids: list[str] = []
+    cable: list[str] = []
     try:
-        udids = json.loads(out_simple)
+        cable = json.loads(out_simple)
     except Exception:
         pass
-    udids = list(dict.fromkeys(udids))  # de-dupe, keep order
+    cable = list(dict.fromkeys(cable))
+
+    # А теперь без --usb: сюда попадают и телефоны, доступные по Wi-Fi. Такое
+    # возможно, если телефон хоть раз подключали кабелем и включена
+    # синхронизация по сети - тогда он отвечает и без провода.
+    rc_all, out_all, err_all = pmd3("usbmux", "list", "--simple", timeout=15)
+    everything: list[str] = []
+    try:
+        everything = json.loads(out_all)
+    except Exception:
+        everything = list(cable)
+    everything = list(dict.fromkeys(everything))
+    over_wifi = [u for u in everything if u not in cable]
+    udids = cable + over_wifi
 
     if not udids:
         # Nothing physically detected at the USB level - a real "not
@@ -2351,7 +2371,7 @@ def list_devices() -> dict:
     # DOES require the pairing/trust dialog to have been accepted. If this
     # fails, we still know from step 1 that something is plugged in, so we
     # show it with a "needs trust" flag instead of hiding it entirely.
-    rc_full, out_full, err_full = pmd3("usbmux", "list", "--usb", timeout=30)
+    rc_full, out_full, err_full = pmd3("usbmux", "list", timeout=30)
     devices = []
     seen_udids = set()
     try:
@@ -2367,12 +2387,14 @@ def list_devices() -> dict:
                 "product": d.get("ProductType", "?"),
                 "ios": d.get("ProductVersion", "?"),
                 "needs_trust": False,
+                "over_wifi": udid in over_wifi,
             })
         for udid in udids:
             if udid not in seen_udids:
                 devices.append({
                     "udid": udid, "name": "iPhone/iPad (не подтверждено доверие)",
                     "product": "?", "ios": "?", "needs_trust": True,
+                    "over_wifi": udid in over_wifi,
                 })
     except Exception:
         # Full lookup failed entirely (typically: trust not yet accepted on
@@ -2382,6 +2404,7 @@ def list_devices() -> dict:
             devices.append({
                 "udid": udid, "name": "iPhone/iPad (не подтверждено доверие)",
                 "product": "?", "ios": "?", "needs_trust": True,
+                "over_wifi": udid in over_wifi,
             })
 
     return {"ok": True, "devices": devices, "raw": out_full + err_full}
@@ -2777,6 +2800,45 @@ def icon_content_type(data: bytes) -> str:
     return "application/octet-stream"
 
 
+def resolve_missing_store_ids(bundle_ids: list) -> int:
+    """Достаёт App Store ID по внутреннему имени приложения. Телефон знает ID
+    только у того, что ставилось из App Store; у перенесённого или
+    поставленного из файла отметки нет. Зато магазин умеет искать по имени -
+    если приложение из каталога не убрали."""
+    if _download_state.get("running") or _install_state.get("running") or _login_running:
+        return 0
+    known = load_known_apps() or {}
+    found_now = 0
+    for bundle_id in bundle_ids:
+        entry = known.get(bundle_id)
+        if not isinstance(entry, dict) or entry.get("item_id") or entry.get("no_store_id"):
+            continue
+        got = None
+        for country in ("ru", "us", "kz", "by"):
+            try:
+                raw = _fetch("https://itunes.apple.com/lookup?country=" + country
+                             + "&bundleId=" + bundle_id, timeout=25)
+                answer = json.loads(raw.decode("utf-8", "replace"))
+            except Exception:
+                continue
+            if answer.get("resultCount"):
+                item = answer["results"][0]
+                got = {"item_id": item.get("trackId"), "name": item.get("trackName")}
+                break
+            time.sleep(0.1)
+        if got and got.get("item_id"):
+            entry["item_id"] = got["item_id"]
+            if not entry.get("name") or entry.get("name") == bundle_id:
+                entry["name"] = got["name"]
+            found_now += 1
+        else:
+            # Помечаем, чтобы не спрашивать магазин об этом же каждый раз.
+            entry["no_store_id"] = True
+    if found_now or bundle_ids:
+        save_known_apps(known)
+    return found_now
+
+
 def fetch_store_icons(bundle_ids: list) -> int:
     """Достаёт настоящие значки из App Store для приложений, которых на этом
     телефоне нет - у них неоткуда взяться значку с устройства, и раньше вместо
@@ -2806,8 +2868,11 @@ def fetch_store_icons(bundle_ids: list) -> int:
     if not wanted:
         return 0
 
-    if _download_state.get("running") or _install_state.get("running"):
-        return 0                       # телефон и сеть заняты делом важнее
+    if _download_state.get("running") or _install_state.get("running") or _login_running:
+        # Скачивание, установка и вход идут к тем же серверам Apple. Тянуть
+        # в это время сотни значков - мешать человеку в самый неподходящий
+        # момент: вход и так отвечает не с первого раза.
+        return 0
     saved = 0
     ids = list(wanted)
     # Магазин у Apple разный по странам: российское приложение в американском
@@ -3176,6 +3241,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(status)
             elif path == "/api/devices":
                 devices = list_devices()
+                for found in (devices.get("devices") or []):
+                    if not found.get("over_wifi") and not found.get("needs_trust"):
+                        threading.Thread(target=auto_enable_wifi,
+                                         args=(found.get("udid", ""),), daemon=True).start()
                 # The moment a phone is seen, write down what's on it. Waiting
                 # for the user to open a particular screen would mean losing
                 # the ids of apps that vanish before they ever do.
@@ -3205,6 +3274,7 @@ class Handler(BaseHTTPRequestHandler):
                               if a.get("bundle_id")]
                 if need_icons:
                     def icons_job():
+                        resolve_missing_store_ids(need_icons)
                         fetch_store_icons(need_icons)
                         repair_store_icons()
 
@@ -3295,6 +3365,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(apply_update_now())
             elif path == "/api/report":
                 self._send_json(start_report())
+            elif path == "/api/export-db":
+                self._send_json(export_apps_db())
+            elif path == "/api/enable-wifi":
+                self._send_json(enable_wifi_connections(body.get("udid")))
             elif path == "/api/diagnose":
                 self._send_json(start_diagnose(body.get("udid")))
             elif path == "/api/pick-ipa-files":
@@ -3619,6 +3693,58 @@ def adopt_update_if_ready() -> None:
         os.execv(GUI_PYTHON_EXE, [GUI_PYTHON_EXE, str(candidate)] + sys.argv[1:])
     except Exception:
         pass                        # не вышло - работаем как есть
+
+
+def merge_shared_apps_db() -> int:
+    """Забирает общую базу App Store ID из того же хранилища и подмешивает к
+    своей. Смысл простой: телефон, который видели на одном компьютере, теперь
+    известен и остальным - не нужно каждому набивать базу заново.
+    Своё никогда не теряем: чужие записи только добавляют недостающее."""
+    try:
+        raw = _fetch(update_base_url() + "known_apps.json", timeout=60)
+        shared = json.loads(raw.decode("utf-8", "replace"))
+        if not isinstance(shared, dict):
+            return 0
+    except Exception:
+        return 0                      # файла нет или нет связи - не беда
+
+    mine = load_known_apps() or {}
+    added = 0
+    for bundle_id, theirs in shared.items():
+        if not isinstance(theirs, dict):
+            continue
+        ours = mine.get(bundle_id)
+        if not isinstance(ours, dict):
+            mine[bundle_id] = dict(theirs)
+            added += 1
+            continue
+        if not ours.get("item_id") and theirs.get("item_id"):
+            ours["item_id"] = theirs["item_id"]
+            ours.pop("no_store_id", None)
+            added += 1
+        if not ours.get("name") or ours.get("name") == bundle_id:
+            if theirs.get("name"):
+                ours["name"] = theirs["name"]
+        # где кого видели - складываем, это помогает вкладке «удалённые»
+        seen = set(ours.get("seen_on") or []) | set(theirs.get("seen_on") or [])
+        if seen:
+            ours["seen_on"] = sorted(seen)
+    if added:
+        save_known_apps(mine)
+    return added
+
+
+def export_apps_db() -> dict:
+    """Кладёт свою базу на Рабочий стол - чтобы её можно было передать и
+    добавить в общую."""
+    try:
+        target = desktop_dir() / "known_apps.json"
+        target.write_text(json.dumps(load_known_apps() or {}, ensure_ascii=False, indent=1),
+                          encoding="utf-8")
+        reveal_in_finder(str(target))
+        return {"ok": True, "path": str(target), "count": len(load_known_apps() or {})}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 def check_for_updates() -> None:
@@ -4028,6 +4154,7 @@ async def main():
     info = await value() or {}
     disk = await value("com.apple.disk_usage") or {}
     battery = await value("com.apple.mobile.battery") or {}
+    wifi = await value("com.apple.mobile.wireless_lockdown", "EnableWifiConnections")
 
     out = {"main": {k: info.get(k) for k in (
         "DeviceName", "ProductType", "ProductVersion", "BuildVersion", "ModelNumber",
@@ -4043,7 +4170,8 @@ async def main():
         ) if disk.get(k) is not None},
         "battery": {k: battery.get(k) for k in (
             "BatteryCurrentCapacity", "BatteryIsCharging", "ExternalConnected",
-        ) if battery.get(k) is not None}}
+        ) if battery.get(k) is not None},
+        "wifi_enabled": bool(wifi)}
 
     # Здоровье батареи лежит отдельно и не на всех прошивках доступно.
     try:
@@ -4137,6 +4265,7 @@ def device_info(udid: str | None) -> dict:
     add("Активирован", "да" if main.get("ActivationState") == "Activated" else main.get("ActivationState"))
     add("Код-пароль", "стоит" if main.get("PasswordProtected") else "нет")
     add("Часовой пояс", main.get("TimeZone"))
+    add("Работа по Wi-Fi", "разрешена" if answer.get("wifi_enabled") else "выключена")
 
     charge = battery.get("BatteryCurrentCapacity")
     if charge is not None:
@@ -4151,6 +4280,7 @@ def device_info(udid: str | None) -> dict:
     return {
         "ok": True,
         "rows": rows,
+        "wifi_enabled": bool(answer.get("wifi_enabled")),
         "storage": {
             "total": total,
             "used": used,
@@ -4170,6 +4300,86 @@ def device_info(udid: str | None) -> dict:
             "cycles": battery.get("CycleCount"),
         },
     }
+
+
+_ENABLE_WIFI_SCRIPT = r'''
+import asyncio, inspect, json, sys
+from pymobiledevice3.lockdown import create_using_usbmux
+
+async def main():
+    udid = sys.argv[1] or None
+    lockdown = create_using_usbmux(serial=udid) if udid else create_using_usbmux()
+    if inspect.iscoroutine(lockdown): lockdown = await lockdown
+    result = lockdown.set_value(True, domain="com.apple.mobile.wireless_lockdown",
+                                key="EnableWifiConnections")
+    if inspect.iscoroutine(result): result = await result
+    check = lockdown.get_value(domain="com.apple.mobile.wireless_lockdown",
+                               key="EnableWifiConnections")
+    if inspect.iscoroutine(check): check = await check
+    print(json.dumps({"enabled": bool(check)}))
+
+asyncio.run(main())
+'''
+
+
+WIFI_DONE_FILE = LOCK_DIR / "wifi_enabled_for.json"
+# Включается по-местному: файл есть - разрешаем телефонам работу по Wi-Fi сами,
+# файла нет - не трогаем чужие телефоны вовсе. Программа у всех одна, а
+# поведение у каждого своё.
+AUTO_WIFI_FLAG = LOCK_DIR / "auto_wifi.on"
+_wifi_lock = threading.Lock()
+
+
+def _wifi_done() -> set:
+    try:
+        return set(json.loads(WIFI_DONE_FILE.read_text(encoding="utf-8")))
+    except Exception:
+        return set()
+
+
+def _remember_wifi_done(udid: str) -> None:
+    try:
+        done = _wifi_done()
+        done.add(udid)
+        LOCK_DIR.mkdir(parents=True, exist_ok=True)
+        WIFI_DONE_FILE.write_text(json.dumps(sorted(done)), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def auto_enable_wifi(udid: str) -> None:
+    """Пока телефон на кабеле - разрешаем ему отвечать и по Wi-Fi. Делается
+    один раз на телефон: дальше он остаётся в списке и без провода, что
+    выручает, когда разъём работает через раз."""
+    if not AUTO_WIFI_FLAG.exists():
+        return                      # на этом компьютере не включено
+    if not udid or udid in _wifi_done():
+        return
+    if _download_state.get("running") or _install_state.get("running") or _login_running:
+        return                      # не лезем, пока человек занят делом
+    if not _wifi_lock.acquire(blocking=False):
+        return
+    try:
+        answer = _run_device_script(_ENABLE_WIFI_SCRIPT, udid, timeout=60)
+        if answer and answer.get("enabled"):
+            _remember_wifi_done(udid)
+    except Exception:
+        pass
+    finally:
+        _wifi_lock.release()
+
+
+def enable_wifi_connections(udid: str | None) -> dict:
+    """Разрешает телефону отвечать по Wi-Fi. Нужно один раз, пока он на
+    кабеле: дальше он остаётся в списке и без провода. Особенно выручает,
+    когда разъём работает через раз."""
+    answer = _run_device_script(_ENABLE_WIFI_SCRIPT, udid, timeout=90)
+    if not answer:
+        return {"ok": False, "error": "Телефон не ответил. Подключи его кабелем, "
+                                      "разблокируй и попробуй ещё раз."}
+    if not answer.get("enabled"):
+        return {"ok": False, "error": "Телефон не принял настройку."}
+    return {"ok": True}
 
 
 def diagnose(udid: str | None = None) -> dict:
@@ -4234,6 +4444,10 @@ def diagnose(udid: str | None = None) -> dict:
     else:
         add("Драйвер Apple", True, "в macOS встроен")
 
+    wifi_only = [d for d in (list_devices().get("devices") or []) if d.get("over_wifi")]
+    if wifi_only:
+        add("Подключение по Wi-Fi", True,
+            "доступно: " + ", ".join(d.get("name", "?") for d in wifi_only[:3]))
     add("usbmux (видит ли компьютер телефон)", usbmux.get("ok") and usbmux.get("count"),
         ("найдено устройств: " + str(usbmux.get("count"))) if usbmux.get("ok") and usbmux.get("count")
         else ("телефон не подключён или кабель только для зарядки" if usbmux.get("ok")
@@ -4334,6 +4548,8 @@ def build_report() -> dict:
     L.append("Папка данных: " + str(LOCK_DIR))
     L.append("Интерфейс: " + str(active_index_html()))
     L.append("Адрес обновлений: " + update_base_url())
+    L.append("Сам разрешает работу по Wi-Fi: "
+             + ("да" if AUTO_WIFI_FLAG.exists() else "нет"))
 
     L += ["", "== КОМПЬЮТЕР =="]
     L.append("Система: " + platform.platform())
@@ -4521,6 +4737,10 @@ def main():
             pass
         while True:
             check_for_updates()
+            try:
+                merge_shared_apps_db()
+            except Exception:
+                pass
             time.sleep(1800)
 
     threading.Thread(target=background_chores, daemon=True).start()

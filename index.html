@@ -372,6 +372,7 @@
          а попасть по ней случайно - неприятно. -->
     <button class="sidebar-btn report-btn" id="diagnoseBtn" style="display:none"
             onclick="runDiagnose(this)">🔌 Почему телефон не виден</button>
+    <button class="sidebar-btn report-btn" onclick="shareDatabase(this)">🗂 Поделиться базой ID</button>
     <button class="sidebar-btn report-btn" onclick="sendReport(this)">🧾 Сообщить об ошибке</button>
     <div class="version-line" id="versionLine"></div>
   </div>
@@ -660,6 +661,28 @@ async function runDiagnose(btn) {
   btn.textContent = original;
 }
 
+// База App Store ID у каждого своя. Эта кнопка кладёт её на Рабочий стол,
+// чтобы можно было передать и добавить в общую - тогда ей пользуются все.
+async function shareDatabase(btn) {
+  const msg = document.getElementById("mainMsg");
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Выгружаю…";
+  try {
+    const res = await api("POST", "/api/export-db", {});
+    if (res.ok) {
+      showMsg(msg, `База выгружена на Рабочий стол: ${res.count} приложений. `
+        + "Перешли файл known_apps.json Динару — он добавит их в общую.", "ok");
+    } else {
+      showMsg(msg, res.error || "Не получилось выгрузить базу", "err");
+    }
+  } catch (e) {
+    showMsg(msg, "Ошибка: " + e, "err");
+  }
+  btn.disabled = false;
+  btn.textContent = original;
+}
+
 async function sendReport(btn) {
   const msg = document.getElementById("mainMsg");
   const original = btn.textContent;
@@ -817,6 +840,8 @@ async function showDeviceInfo() {
   document.getElementById("infoTitle").textContent = name;
   const st = info.storage || {};
   const bat = info.battery || {};
+  const wifiNote = (devices.find(x => x.udid === udid) || {}).over_wifi
+    ? '<div class="storage-text">Телефон подключён по Wi-Fi — всё работает, но выгрузка и установка идут медленнее, чем по кабелю.</div>' : "";
   let head = "";
   if (st.total) {
     head += `<div class="bar-label">Память</div>`
@@ -833,7 +858,115 @@ async function showDeviceInfo() {
       + (bat.percent != null ? ` · сейчас заряд ${bat.percent}%` : "")
       + `</div>`;
   }
-  document.getElementById("infoStorage").innerHTML = head;
+  document.getElementById("infoStorage").innerHTML = wifiNote + head;
+    // Ждём, пока новый движок поднимется на том же порту.
+    for (let i = 0; i < 40; i++) {
+      await new Promise(r => setTimeout(r, 700));
+      try {
+        const st = await api("GET", "/api/status");
+        if (st.version === res.version) { location.reload(); return; }
+      } catch (e) { /* поднимается */ }
+    }
+    location.reload();
+  } catch (e) {
+    // Связь рвётся ровно в момент перезапуска - это нормально.
+    setTimeout(() => location.reload(), 3000);
+  }
+}
+
+function togglePassword() {
+  const field = document.getElementById("loginPassword");
+  const eye = document.getElementById("pwdEye");
+  const hidden = field.type === "password";
+  field.type = hidden ? "text" : "password";
+  eye.textContent = hidden ? "скрыть" : "показать";
+  eye.title = hidden ? "Скрыть пароль" : "Показать пароль";
+  field.focus();
+}
+
+// Единая очередь всех дел с телефоном: выгрузка .ipa, установка файлов и
+// возвращение удалённых приложений. Она одна, потому что и телефон, и
+// App Store принимают одно дело за раз - параллельно быстрее не станет,
+// станет только менее надёжно. Всё видно на вкладке «Список».
+let jobs = [];
+let jobsRunning = false;
+let jobSeq = 0;
+const pause = ms => new Promise(r => setTimeout(r, ms));
+
+const JOB_TITLES = { export: "Выгрузка", install: "Установка", restore: "Возвращение" };
+const JOB_MARKS = { wait: "⏳", work: "⬇", done: "✓", fail: "✗" };
+
+function addJob(job) {
+  job.id = ++jobSeq;
+  job.state = "wait";
+  jobs.push(job);
+  updateQueueBadge();
+  if (currentTab === "queue") renderJobs();
+  runJobs();
+  return job;
+}
+
+document.addEventListener("click", () => document.getElementById("deviceMenu").classList.remove("on"));
+
+async function showDeviceInfo() {
+  const menu = document.getElementById("deviceMenu");
+  const udid = menu.dataset.udid || activeUdid;
+  menu.classList.remove("on");
+  const modal = document.getElementById("infoModal");
+  document.getElementById("infoTitle").textContent = "Собираю сведения…";
+  document.getElementById("infoRows").innerHTML = "";
+  document.getElementById("infoStorage").innerHTML = "";
+  modal.classList.add("on");
+  const info = await api("GET", "/api/device-info?udid=" + encodeURIComponent(udid || ""));
+  if (!info.ok) {
+    document.getElementById("infoTitle").textContent = "Не получилось";
+    document.getElementById("infoRows").textContent = info.error || "Телефон не ответил";
+    return;
+  }
+  const name = (info.rows.find(r => r.label === "Название") || {}).value || "Телефон";
+  document.getElementById("infoTitle").textContent = name;
+  const st = info.storage || {};
+  const bat = info.battery || {};
+  const wifiNote = (devices.find(x => x.udid === udid) || {}).over_wifi
+    ? '<div class="storage-text">Телефон подключён по Wi-Fi — всё работает, но выгрузка и установка идут медленнее, чем по кабелю.</div>' : "";
+  let head = "";
+  if (st.total) {
+    head += `<div class="bar-label">Память</div>`
+      + `<div class="storage-bar"><div style="width:${Math.min(100, st.percent)}%"></div></div>`
+      + `<div class="storage-text">Занято ${st.used_text} из ${st.total_text} · свободно ${st.free_text}</div>`;
+  }
+  if (bat.health) {
+    // Зелёная полоса, пока батарея здорова; ниже 80% Apple считает её изношенной.
+    const color = bat.health >= 80 ? "#34c759" : (bat.health >= 60 ? "#ff9f0a" : "#ff3b30");
+    head += `<div class="bar-label">Здоровье батареи</div>`
+      + `<div class="storage-bar"><div style="width:${Math.min(100, bat.health)}%; background:${color}"></div></div>`
+      + `<div class="storage-text">${bat.health}% от заводской ёмкости`
+      + (bat.cycles ? ` · ${bat.cycles} циклов зарядки` : "")
+      + (bat.percent != null ? ` · сейчас заряд ${bat.percent}%` : "")
+      + `</div>`;
+  }
+  document.getElementById("infoStorage").innerHTML = wifiNote + head;
+  // Если телефон не умеет отвечать по Wi-Fi - предлагаем разрешить прямо
+  // отсюда, пока он на кабеле. Потом провод не понадобится.
+  if (info.wifi_enabled === false) {
+    const box = document.getElementById("infoStorage");
+    const note = document.createElement("div");
+    note.className = "storage-text";
+    note.textContent = "Сейчас телефон виден только по кабелю. Можно разрешить работу "
+      + "по Wi-Fi — тогда он останется в списке и после отключения провода.";
+    const btn = document.createElement("button");
+    btn.className = "modal-btn";
+    btn.textContent = "Разрешить работу по Wi-Fi";
+    btn.onclick = async () => {
+      btn.disabled = true;
+      btn.textContent = "Разрешаю…";
+      const res = await api("POST", "/api/enable-wifi", { udid });
+      btn.textContent = res.ok ? "Готово — провод больше не нужен" : (res.error || "Не получилось");
+      if (res.ok) setTimeout(() => showDeviceInfo(), 1500);
+    };
+    box.appendChild(note);
+    box.appendChild(btn);
+  }
   const box = document.getElementById("infoRows");
   const shownAsBars = new Set(["Батарея", "Циклов зарядки", "Здоровье батареи", "Название"]);
   info.rows.filter(r => !shownAsBars.has(r.label)).forEach(r => {
@@ -1133,7 +1266,11 @@ async function loadDevices(attempt = 0) {
     if (d.needs_trust) {
       div.innerHTML = `<span class="device-icon">⚠️</span><div><div>Нужно подтвердить доверие</div><div class="device-meta">На экране телефона нажми «Доверять»</div></div>`;
     } else {
-      div.innerHTML = `<span class="device-icon">📱</span><div><div>${d.name}</div><div class="device-meta">iOS ${d.ios}</div></div>`;
+      // Телефон, доступный по сети, помечаем отдельно: по Wi-Fi всё работает,
+      // но заметно медленнее, и человек должен понимать, почему.
+      const how = d.over_wifi ? " · по Wi-Fi" : "";
+      div.innerHTML = `<span class="device-icon">${d.over_wifi ? "📶" : "📱"}</span>`
+        + `<div><div>${d.name}</div><div class="device-meta">iOS ${d.ios}${how}</div></div>`;
     }
     div.onclick = () => selectDevice(d.udid);
     // Правой кнопкой - как принято в системе: маленькое меню у курсора.

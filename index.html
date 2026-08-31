@@ -443,6 +443,7 @@
       <button class="secondary tab-btn" id="tabInstalled" onclick="showTab('installed')">Установленные</button>
       <button class="secondary tab-btn" id="tabVanished" onclick="showTab('vanished')">Удалённые приложения</button>
       <button class="secondary tab-btn" id="tabQueue" onclick="showTab('queue')">Список</button>
+      <button class="secondary tab-btn" id="tabDownload" onclick="showTab('download')">Из App Store</button>
       <input type="search" id="appSearch" class="list-search" placeholder="Поиск по названию или ID"
              oninput="filterList()" autocomplete="off">
       <span id="memoryStats"></span>
@@ -1294,9 +1295,238 @@ function showTab(tab) {
   document.getElementById("tabInstalled").classList.toggle("active", tab === "installed");
   document.getElementById("tabVanished").classList.toggle("active", tab === "vanished");
   document.getElementById("tabQueue").classList.toggle("active", tab === "queue");
+  document.getElementById("tabDownload").classList.toggle("active", tab === "download");
   if (tab === "installed") loadApps();
   else if (tab === "vanished") loadVanished();
+  else if (tab === "download") loadConfigurator();
   else renderJobs();
+}
+
+// Скачивание из App Store через Apple Configurator: старый вход в магазин
+// Apple отдаёт 403 всем (даже iMazing). Живой путь остался у Configurator — он
+// качает правильный iPhone-.ipa, а SideKit ловит файл из его кэша и ставит.
+let _cfgPoll = null;
+async function loadConfigurator() {
+  const list = document.getElementById("appList");
+  let data = {}, relay = { items: [] };
+  try { data = await api("GET", "/api/configurator"); } catch (e) {}
+  try { relay = await api("GET", "/api/relay-list"); } catch (e) {}
+  list.innerHTML = "";
+
+  // --- Пришло с другого компьютера семьи (работает и на Windows) ---
+  const inbox = relay.items || [];
+  const inboxHead = document.createElement("div");
+  inboxHead.className = "app-row note-row";
+  inboxHead.style.display = "block";
+  inboxHead.innerHTML = "<b>Общие .ipa (от другого компьютера)</b><br>" +
+    "<span class='app-meta'>Один компьютер качает — остальные ставят на свои телефоны. " +
+    "Отправить свой .ipa: кнопка ниже.</span>";
+  list.appendChild(inboxHead);
+  const sendRow = document.createElement("div");
+  sendRow.className = "app-row";
+  const sendInfo = document.createElement("div");
+  sendInfo.className = "app-info";
+  sendInfo.innerHTML = "<div class='app-name'>Отправить .ipa другому компьютеру</div>" +
+    "<div class='app-meta'>Файл уйдёт на общий сервер, там его заберёт SideKit жены/брата</div>";
+  sendRow.appendChild(sendInfo);
+  const sendBtn = document.createElement("button");
+  sendBtn.textContent = "Выбрать .ipa и отправить";
+  sendBtn.onclick = () => sendFileToRelay(sendBtn);
+  sendRow.appendChild(sendBtn);
+  list.appendChild(sendRow);
+  if (!inbox.length) {
+    const e = document.createElement("div");
+    e.className = "empty-state";
+    e.textContent = "Пока ничего не прислали. Как другой компьютер отправит .ipa — он появится здесь.";
+    list.appendChild(e);
+  } else {
+    inbox.forEach(it => {
+      const row = document.createElement("div");
+      row.className = "app-row";
+      const info = document.createElement("div");
+      info.className = "app-info";
+      const nm = document.createElement("div"); nm.className = "app-name"; nm.textContent = it.name;
+      const meta = document.createElement("div"); meta.className = "app-meta";
+      meta.textContent = (it.bundle || "") + " · " + Math.round((it.size || 0) / 1048576) +
+        " МБ · от " + (it.from || "другого компьютера");
+      info.appendChild(nm); info.appendChild(meta); row.appendChild(info);
+      const b = document.createElement("button");
+      b.textContent = "Поставить на телефон";
+      b.onclick = () => installReceived(it, b);
+      row.appendChild(b);
+      list.appendChild(row);
+    });
+  }
+
+  if (!data.present) {
+    const note = document.createElement("div");
+    note.className = "empty-state";
+    note.innerHTML = "Скачивание из App Store доступно на Маке с <b>Apple Configurator</b>. " +
+      "На этом компьютере — только приём и установка присланных .ipa (выше).";
+    list.appendChild(note);
+    if (_cfgPoll) clearInterval(_cfgPoll);
+    _cfgPoll = setInterval(() => {
+      if (currentTab !== "download") { clearInterval(_cfgPoll); _cfgPoll = null; return; }
+      loadConfigurator();
+    }, 3000);
+    return;
+  }
+  // Подсказка-инструкция.
+  const help = document.createElement("div");
+  help.className = "app-row note-row";
+  help.style.display = "block";
+  help.innerHTML =
+    "<b>Как скачать приложение из App Store:</b><br>" +
+    "1) Открой <b>Apple Configurator</b>, подключи iPhone.<br>" +
+    "2) Двойной клик по телефону → <b>＋ Добавить → Приложения</b>.<br>" +
+    "3) Войди своим Apple ID и выбери приложение <b>из списка своих покупок</b> (не «выбрать файл»).<br>" +
+    "4) Пойдёт скачивание — <b>SideKit поймает файл сам</b> и покажет его тут кнопкой «Поставить на iPhone»." +
+    (data.purchases_count ? "<br><span class='app-meta'>В твоём аккаунте доступно: " +
+      data.purchases_count + " приложений.</span>" : "");
+  list.appendChild(help);
+
+  const catches = data.catches || [];
+  if (!catches.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "Пока ничего не поймано. Начни скачивание в Configurator — файл появится здесь сам.";
+    list.appendChild(empty);
+  } else {
+    catches.forEach(c => {
+      const row = document.createElement("div");
+      row.className = "app-row";
+      const info = document.createElement("div");
+      info.className = "app-info";
+      const nameEl = document.createElement("div");
+      nameEl.className = "app-name";
+      nameEl.textContent = c.name;
+      const metaEl = document.createElement("div");
+      metaEl.className = "app-meta";
+      const mb = Math.round((c.size || 0) / 1048576);
+      metaEl.textContent = (c.bundle_id || "") + " · " + mb + " МБ · поймано из Configurator";
+      info.appendChild(nameEl);
+      info.appendChild(metaEl);
+      row.appendChild(info);
+      const save = document.createElement("button");
+      save.className = "secondary";
+      save.textContent = "Показать файл";
+      save.title = "Открыть .ipa в Finder — это и есть выгруженный файл";
+      save.onclick = () => api("POST", "/api/reveal", { path: c.path });
+      row.appendChild(save);
+      const share = document.createElement("button");
+      share.className = "secondary";
+      share.textContent = "Отправить";
+      share.title = "Отправить этот .ipa на другой компьютер семьи";
+      share.onclick = () => sendCatch(c, share);
+      row.appendChild(share);
+      const btn = document.createElement("button");
+      btn.textContent = "Поставить на iPhone";
+      btn.onclick = () => installCatch(c, btn);
+      row.appendChild(btn);
+      list.appendChild(row);
+    });
+  }
+  // Пока вкладка открыта — тихо обновляем раз в 3 c, чтобы свежепойманное всплывало.
+  if (_cfgPoll) clearInterval(_cfgPoll);
+  _cfgPoll = setInterval(() => {
+    if (currentTab !== "download") { clearInterval(_cfgPoll); _cfgPoll = null; return; }
+    loadConfigurator();
+  }, 3000);
+}
+
+async function installCatch(c, btn) {
+  const msg = document.getElementById("mainMsg");
+  msg.style.display = "none";
+  if (!activeUdid) { showMsg(msg, "Подключи и выбери iPhone слева.", "err"); return; }
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.innerHTML = '<span class="spinner"></span>...';
+  showProgress(`Ставлю ${c.name} на iPhone...`, c.path, true);
+  try {
+    showBannerActions(false);
+    const started = await api("POST", "/api/install", { ipa_path: c.path, udid: activeUdid });
+    if (!started.ok) {
+      hideProgress();
+      showMsg(msg, started.error || "Не получилось начать установку", "err");
+      btn.disabled = false; btn.textContent = originalText; return;
+    }
+    while (true) {
+      await new Promise(r => setTimeout(r, 900));
+      const p = await api("GET", "/api/install-progress");
+      updateProgressPercent(p.percent || 0);
+      if (p.status === "cancelled") {
+        hideProgress(); showMsg(msg, "Установка отменена.", "info");
+        btn.disabled = false; btn.textContent = originalText; return;
+      }
+      if (p.status === "done") {
+        hideProgress(); showMsg(msg, `${c.name} установлено на iPhone.`, "ok");
+        btn.textContent = "Готово"; return;
+      }
+      if (p.status === "error") {
+        hideProgress(); showMsg(msg, p.error || "Установка не удалась", "err");
+        btn.disabled = false; btn.textContent = originalText; return;
+      }
+    }
+  } catch (e) {
+    hideProgress(); showMsg(msg, String(e), "err");
+    btn.disabled = false; btn.textContent = originalText;
+  }
+}
+
+// Отправить пойманный из Configurator .ipa на другой компьютер.
+async function sendCatch(c, btn) {
+  const msg = document.getElementById("mainMsg"); msg.style.display = "none";
+  const t = btn.textContent; btn.disabled = true; btn.textContent = "Отправляю…";
+  try {
+    const r = await api("POST", "/api/relay-send",
+      { ipa_path: c.path, name: c.name, bundle: c.bundle_id || "", target: "all" });
+    if (r && r.ok) { btn.textContent = "Отправлено ✓"; showMsg(msg, `${c.name} отправлено — заберут на другом компьютере.`, "ok"); }
+    else { btn.disabled = false; btn.textContent = t; showMsg(msg, (r && r.error) || "Не отправилось", "err"); }
+  } catch (e) { btn.disabled = false; btn.textContent = t; showMsg(msg, String(e), "err"); }
+}
+
+// Выбрать .ipa файлом и отправить (для файлов от iMazing и т.п.).
+async function sendFileToRelay(btn) {
+  const msg = document.getElementById("mainMsg"); msg.style.display = "none";
+  btn.disabled = true; const t = btn.textContent; btn.textContent = "Выбор файла…";
+  let picked;
+  try { picked = await api("POST", "/api/pick-ipa-files", {}); }
+  catch (e) { btn.disabled = false; btn.textContent = t; showMsg(msg, "Ошибка: " + e, "err"); return; }
+  if (!picked.ok) { btn.disabled = false; btn.textContent = t; if (!picked.cancelled) showMsg(msg, picked.error || "Не выбрано", "err"); return; }
+  let sent = 0;
+  for (const path of picked.paths) {
+    btn.textContent = `Отправляю ${sent + 1}/${picked.paths.length}…`;
+    const name = path.split(/[\\/]/).pop().replace(/\.ipa$/i, "");
+    try { const r = await api("POST", "/api/relay-send", { ipa_path: path, name: name, bundle: "", target: "all" }); if (r && r.ok) sent++; }
+    catch (e) {}
+  }
+  btn.disabled = false; btn.textContent = t;
+  showMsg(msg, `Отправлено ${sent} из ${picked.paths.length}. Заберут на другом компьютере.`, sent ? "ok" : "err");
+}
+
+// Поставить .ipa, присланный с другого компьютера (скачивается с сервера и ставится).
+async function installReceived(it, btn) {
+  const msg = document.getElementById("mainMsg"); msg.style.display = "none";
+  if (!activeUdid) { showMsg(msg, "Подключи и выбери телефон слева.", "err"); return; }
+  btn.disabled = true; const t = btn.textContent;
+  btn.innerHTML = '<span class="spinner"></span> Скачиваю…';
+  showProgress(`Ставлю ${it.name}…`, "Сначала скачиваю с сервера, потом на телефон", true);
+  try {
+    showBannerActions(false);
+    const started = await api("POST", "/api/relay-install", { id: it.id, udid: activeUdid });
+    if (!started.ok && !started.running) {
+      hideProgress(); showMsg(msg, started.error || "Не удалось начать установку", "err");
+      btn.disabled = false; btn.textContent = t; return;
+    }
+    while (true) {
+      await new Promise(r => setTimeout(r, 900));
+      const p = await api("GET", "/api/install-progress");
+      updateProgressPercent(p.percent || 0);
+      if (p.status === "done") { hideProgress(); showMsg(msg, `${it.name} установлено на телефон.`, "ok"); btn.textContent = "Готово"; loadConfigurator(); return; }
+      if (p.status === "cancelled") { hideProgress(); showMsg(msg, "Отменено.", "info"); btn.disabled = false; btn.textContent = t; return; }
+      if (p.status === "error") { hideProgress(); showMsg(msg, p.error || "Установка не удалась", "err"); btn.disabled = false; btn.textContent = t; return; }
+    }
+  } catch (e) { hideProgress(); showMsg(msg, String(e), "err"); btn.disabled = false; btn.textContent = t; }
 }
 
 // Filters whichever list is on screen, by name, bundle id or App Store id -

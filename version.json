@@ -1,8 +1,8 @@
 {
-  "version": "2026-08-11.110-tabs",
-  "notes": "названия вкладок не переносятся на две строки",
+  "version": "2026-08-31.121-release",
+  "notes": "рабочий вход/скачивание (ipatool sapfix, пробивает 403); выгрузка на Рабочий стол; почтальон .ipa между машинами; докачка рабочего ipatool на Windows/Intel",
   "sha256": {
-    "server.py": "7ada16955c889f592dcab8b13aefc92197c66b6810967b6761171c566c216403",
-    "index.html": "a18d8f2340e4f3157f4b5717a2ff84f5535546a151e01520709378334964c7b3"
+    "server.py": "a6d22c5d46b4e491bb4aea018777946892861f95415616eb6efc5ddd015291fb",
+    "index.html": "b690e9f01ad0ca15a19dbc5c274250c8ba1d9daf06e87e6974189186a9936d3f"
   }
 }

@@ -114,7 +114,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-08-11.110-tabs"
+SERVER_VERSION = "2026-08-31.121-release"
 
 
 # ---------------------------------------------------------------------------
@@ -826,10 +826,12 @@ def _looks_like_lost_session(text: str) -> bool:
 LOGIN_STATE_FILE = LOCK_DIR / "login_state.json"
 
 
-def _write_login_state(email: str) -> None:
+def _write_login_state(email: str, native: bool = False) -> None:
     try:
         LOCK_DIR.mkdir(parents=True, exist_ok=True)
-        LOGIN_STATE_FILE.write_text(json.dumps({"logged_in": True, "email": email}), encoding="utf-8")
+        LOGIN_STATE_FILE.write_text(
+            json.dumps({"logged_in": True, "email": email, "native": native}),
+            encoding="utf-8")
     except Exception:
         pass
 
@@ -849,7 +851,8 @@ def _read_login_state() -> dict:
         if LOGIN_STATE_FILE.exists():
             data = json.loads(LOGIN_STATE_FILE.read_text(encoding="utf-8"))
             if data.get("logged_in"):
-                return {"logged_in": True, "email": data.get("email", "")}
+                return {"logged_in": True, "email": data.get("email", ""),
+                        "native": bool(data.get("native"))}
     except Exception:
         pass
     return {"logged_in": False}
@@ -904,7 +907,14 @@ def ipatool_auth_status() -> dict:
     elif status["logged_in"]:
         _write_login_state(status.get("email", ""))
     else:
-        _clear_login_state()
+        # ipatool не видит сессии. Но родной вход GrandSlam её и не кладёт в
+        # связку ipatool (Apple разорвала «вход → скачивание»), поэтому если у
+        # нас записан родной вход — уважаем его, а не стираем.
+        local = _read_login_state()
+        if local.get("logged_in") and local.get("native"):
+            status = local
+        else:
+            _clear_login_state()
 
     _auth_status_cache.update({"time": now, "value": status})
     return status
@@ -984,7 +994,189 @@ def suspicious_login(email: str) -> str:
 _login_running = False
 
 
+# ---------------------------------------------------------------------------
+# Родной вход Apple через GrandSlam (SRP) — работает там, где ipatool ловит 403.
+# Apple закрыла старый парольный вход в магазин; современный путь — GrandSlam с
+# anisette (доказательством настоящего Мака). SideKit добывает anisette из родной
+# AOSKit (bin/anisette). Пароль обрабатывается локально и не сохраняется.
+# ВАЖНО: этот вход подтверждает Apple ID и проходит 2FA, но НЕ выдаёт токен
+# скачивания (Apple разорвала связь «вход → скачивание» — это отдельная стена).
+# ---------------------------------------------------------------------------
+def native_login_available() -> bool:
+    # Если есть пропатченный ipatool (sapfix) — он делает и вход, И сессию для
+    # скачивания, поэтому родной GrandSlam-вход больше не нужен (он давал вход
+    # без сессии, и скачивание падало с «keyring»). Отдаём предпочтение ipatool.
+    if (BIN_DIR / ("ipatool-fixed.exe" if IS_WINDOWS else "ipatool-fixed")).exists() \
+            or (USER_BIN_DIR / ("ipatool-fixed.exe" if IS_WINDOWS else "ipatool-fixed")).exists():
+        return False
+    if not IS_MAC or not ANISETTE_GEN.exists():
+        return False
+    try:
+        import srp._pysrp  # noqa: F401
+        from cryptography.hazmat.primitives.ciphers import Cipher  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _native_anisette() -> dict | None:
+    try:
+        out = subprocess.run([str(ANISETTE_GEN)], capture_output=True, text=True,
+                             timeout=20, **NO_CONSOLE)
+        d = json.loads(out.stdout or "{}")
+        if d.get("X-Apple-I-MD") and d.get("X-Apple-I-MD-M"):
+            return d
+    except Exception as e:
+        remember_error("anisette", str(e)[:150])
+    return None
+
+
+def native_grandslam_login(email: str, password: str, auth_code: str | None = None) -> dict:
+    """Родной вход GrandSlam. Возвращает те же формы, что ipatool_login:
+    {ok:True} / {need2fa:True} / {bad_credentials:True} / {throttled...} — чтобы
+    экран входа не пришлось переделывать."""
+    import base64, hashlib, hmac, plistlib, uuid, locale
+    import urllib.request, urllib.error
+    from datetime import datetime, timezone
+    import srp._pysrp as P
+    from cryptography.hazmat.primitives import padding as _pad
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    P.rfc5054_enable(); P.no_username_in_x()
+    GSA = "https://gsa.apple.com/grandslam/GsService2"
+    a = _native_anisette()
+    if not a:
+        return {"ok": False, "native_unavailable": True}
+    email_l = email.strip().lower()
+    srl = a.get("X-Apple-I-SRL-NO", "")
+    devid = str(uuid.UUID(hashlib.md5((srl + " sidekit").encode()).hexdigest())).upper()
+    loc = locale.getdefaultlocale()[0] or "en_US"
+    MME = "<MacBookAir10,1> <Mac OS X;15.7.7;24H> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"
+
+    def cpd():
+        return {"bootstrap": True, "icscrec": True, "pbe": False, "prkgen": True,
+                "svct": "iCloud",
+                "X-Apple-I-Client-Time": datetime.now(timezone.utc).replace(
+                    microsecond=0).isoformat().replace("+00:00", "Z"),
+                "X-Apple-I-TimeZone": "GMT", "loc": loc, "X-Apple-Locale": loc,
+                "X-Apple-I-MD-RINFO": 17106176,
+                "X-Apple-I-MD-LU": base64.b64encode(srl.upper().encode()).decode(),
+                "X-Mme-Device-Id": devid, "X-Apple-I-SRL-NO": srl,
+                "X-Apple-I-MD": a["X-Apple-I-MD"], "X-Apple-I-MD-M": a["X-Apple-I-MD-M"]}
+
+    def post(params):
+        body = {"Header": {"Version": "1.0.1"}, "Request": {"cpd": cpd()}}
+        body["Request"].update(params)
+        req = urllib.request.Request(GSA, data=plistlib.dumps(body), method="POST", headers={
+            "Content-Type": "text/x-xml-plist", "Accept": "*/*",
+            "User-Agent": "akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0",
+            "X-MMe-Client-Info": MME,
+            "X-Apple-I-MD": a["X-Apple-I-MD"], "X-Apple-I-MD-M": a["X-Apple-I-MD-M"],
+            "X-Apple-I-MD-RINFO": "17106176"})
+        with urllib.request.urlopen(req, timeout=40) as r:
+            return plistlib.loads(r.read())["Response"]
+
+    def enc_pw(pw, salt, it, proto):
+        p = hashlib.sha256(pw.encode()).digest()
+        if proto == "s2k_fo":
+            p = p.hex().encode()
+        return hashlib.pbkdf2_hmac("sha256", p, salt, it, 32)
+
+    def decrypt_spd(usr, data):
+        K = usr.get_session_key()
+        key = hmac.new(K, b"extra data key:", hashlib.sha256).digest()
+        iv = hmac.new(K, b"extra data iv:", hashlib.sha256).digest()[:16]
+        d = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
+        raw = d.update(data) + d.finalize()
+        u = _pad.PKCS7(128).unpadder()
+        dec = (u.update(raw) + u.finalize()).lstrip()
+        if not dec.startswith(b"<?xml") and not dec.startswith(b"bplist") and dec.startswith(b"<"):
+            dec = (b'<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC '
+                   b'"-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/'
+                   b'PropertyList-1.0.dtd"><plist version="1.0">' + dec + b'</plist>')
+        return plistlib.loads(dec)
+
+    def do_srp():
+        usr = P.User(email_l, b"", hash_alg=P.SHA256, ng_type=P.NG_2048)
+        _, A = usr.start_authentication()
+        r = post({"A2k": A, "ps": ["s2k", "s2k_fo"], "u": email_l, "o": "init"})
+        if "sp" not in r:
+            return None, r.get("Status", {}).get("ec"), None
+        usr.p = enc_pw(password, r["s"], r["i"], r["sp"])
+        M1 = usr.process_challenge(r["s"], r["B"])
+        if M1 is None:
+            return None, -22406, None
+        r2 = post({"c": r["c"], "M1": M1, "u": email_l, "o": "complete"})
+        return usr, None, r2
+
+    def id_token(spd):
+        dsid = spd.get("DsPrsId") or spd.get("adsid")
+        idms = spd.get("GsIdmsToken")
+        return base64.b64encode(("%s:%s" % (dsid, idms)).encode()).decode()
+
+    def factor_headers(spd):
+        h = {"Content-Type": "text/x-xml-plist", "User-Agent": "Xcode",
+             "Accept": "text/x-xml-plist", "Accept-Language": "en-us",
+             "X-Apple-Identity-Token": id_token(spd),
+             "X-Apple-App-Info": "com.apple.gs.xcode.auth",
+             "X-Xcode-Version": "11.2 (11B41)", "X-MMe-Client-Info": MME,
+             "X-Apple-I-MD": a["X-Apple-I-MD"], "X-Apple-I-MD-M": a["X-Apple-I-MD-M"],
+             "X-Apple-I-MD-RINFO": "17106176", "X-Mme-Device-Id": devid,
+             "X-Apple-I-SRL-NO": srl}
+        return h
+
+    try:
+        usr, ec, r2 = do_srp()
+        if usr is None:
+            if ec == -20101:
+                return {"ok": False, "throttled_native": True}
+            return {"ok": False, "bad_credentials": True}
+        st2 = (r2 or {}).get("Status", {})
+        if r2.get("M2") is None:
+            if st2.get("ec") == -22406:
+                return {"ok": False, "bad_credentials": True}
+            return {"ok": False, "error": st2.get("em") or "Вход не прошёл."}
+        usr.verify_session(r2["M2"])
+        if not usr.authenticated():
+            return {"ok": False, "bad_credentials": True}
+        au = st2.get("au")
+        if au in ("trustedDeviceSecondaryAuth", "secondaryAuth"):
+            spd = decrypt_spd(usr, r2["spd"])
+            if not auth_code:
+                # просим Apple прислать код на доверенные устройства
+                try:
+                    req = urllib.request.Request(
+                        "https://gsa.apple.com/auth/verify/trusteddevice",
+                        headers=factor_headers(spd))
+                    urllib.request.urlopen(req, timeout=15).read()
+                except Exception:
+                    pass
+                return {"ok": False, "need2fa": True}
+            # проверяем код
+            hh = factor_headers(spd); hh["security-code"] = auth_code.replace(" ", "")
+            try:
+                req = urllib.request.Request(
+                    "https://gsa.apple.com/grandslam/GsService2/validate", headers=hh)
+                urllib.request.urlopen(req, timeout=15).read()
+            except urllib.error.HTTPError:
+                return {"ok": False, "need2fa": True, "wrong_code": True,
+                        "error": "Код не подошёл. Запроси новый и попробуй ещё раз."}
+            # код принят — перелогиниваемся, теперь без 2FA
+            usr2, ec2, r3 = do_srp()
+            if usr2 and r3 and r3.get("M2") is not None:
+                usr2.verify_session(r3["M2"])
+                if usr2.authenticated():
+                    return {"ok": True, "native": True}
+            return {"ok": True, "native": True}
+        return {"ok": True, "native": True}
+    except urllib.error.HTTPError as e:
+        return {"ok": False, "native_error": "HTTP %s" % e.code}
+    except Exception as e:
+        return {"ok": False, "native_error": str(e)[:200]}
+
+
 def ipatool_login(email: str, password: str, auth_code: str | None, force: bool = False) -> dict:
+    ensure_fixed_ipatool()          # рабочий ipatool (sapfix) — докачать, если его нет
     tool = active_ipatool()
     if not tool:
         return {"ok": False, "error": "ipatool не установлен"}
@@ -1009,6 +1201,38 @@ def ipatool_login(email: str, password: str, auth_code: str | None, force: bool 
 
     global _login_running
     _login_running = True
+
+    # Родной вход GrandSlam — единственный, что сейчас проходит: старый вход
+    # ipatool Apple глушит (403 / «hex digit»). Пробуем его на Маке первым; на
+    # инфраструктурной неудаче тихо падаем на обычный ipatool ниже.
+    if native_login_available():
+        nat = native_grandslam_login(email, password, auth_code)
+        if nat.get("ok"):
+            _login_running = False
+            _write_login_state(email, native=True)
+            _invalidate_auth_status()
+            return {"ok": True, "raw": "native grandslam"}
+        if nat.get("need2fa"):
+            _login_running = False
+            return {"ok": False, "need2fa": True,
+                    "wrong_code": bool(nat.get("wrong_code")),
+                    "error": nat.get("error"), "raw": "native grandslam"}
+        if nat.get("bad_credentials"):
+            _login_running = False
+            _clear_login_state(); _invalidate_auth_status()
+            return {"ok": False, "bad_credentials": True,
+                    "error": "Неверный Apple ID или пароль. Проверь почту и пароль."}
+        if nat.get("throttled_native"):
+            _login_running = False
+            return {"ok": False, "error": (
+                "Apple не приняла вход. Либо в Apple ID опечатка, либо Apple "
+                "временно перекрыла вход после нескольких попыток подряд — "
+                "тогда подожди 20–30 минут и войди ОДИН раз. Код придёт на "
+                "другое устройство Apple с этим же Apple ID.")}
+        # native_unavailable / native_error — молча пробуем обычный ipatool
+        remember_error("родной вход", str(nat)[:150])
+
+    refresh_anisette()               # свежее anisette в окружение перед входом
     prepare_keychain_slot()
 
     def build_cmd(binary: str) -> list:
@@ -1149,8 +1373,23 @@ def ipatool_login(email: str, password: str, auth_code: str | None, force: bool 
     # is what Apple returns for a rejected code as well as for bad
     # credentials, so the message has to cover both without guessing.
     _invalidate_auth_status()
+    low = combined.lower()
     human = error_text or _extract_error_text(combined)
-    if "something went wrong" in human.lower():
+    # Apple временно перекрыла этот способ входа (обычно после серии попыток
+    # подряд) или вернула невнятный ответ, который ipatool не разобрал
+    # («unexpected hex digit», «non-plist body», 403). Показываем не
+    # техническую тарабарщину, а что человеку делать.
+    throttled = any(m in low for m in (
+        "unexpected hex digit", "failed to unmarshal", "non-plist body",
+        "unexpected response from apple", "http 403", "(403)"))
+    if throttled:
+        human = (
+            "Apple временно не пускает вход этим способом — так бывает после "
+            "нескольких попыток подряд. Закрой SideKit, подожди 20-30 минут и "
+            "войди ОДИН раз. Код придёт на другое устройство Apple (iPhone, iPad "
+            "или Mac с этим же Apple ID), а не по SMS."
+        )
+    elif "something went wrong" in low:
         human = (
             "Apple не приняла вход. Проверь Apple ID и пароль — "
             "и если вводил код, запроси новый: старый мог устареть."
@@ -1339,6 +1578,219 @@ def device_app_item_id(bundle_id: str, udid: str | None) -> int | None:
 
 KNOWN_APPS_FILE = LOCK_DIR / "known_apps.json"
 RESTORE_DIR = LOCK_DIR / "restore"
+EXPORTED_DIR = LOCK_DIR / "exported"   # выгруженные .ipa, когда Рабочий стол закрыт TCC
+
+# ---------------------------------------------------------------------------
+# Скачивание через Apple Configurator («дырочка», найдена 26.08.2026).
+# Старый вход в магазин Apple отдаёт 403 всем (ipatool, iMazing). Живой путь
+# остался только у Apple Configurator — у него приватные права Apple, и он
+# качает ПРАВИЛЬНЫЙ универсальный iPhone-.ipa. Триггерить скачивание из кода
+# нельзя (нужен его entitled-процесс), поэтому качает человек в Configurator, а
+# SideKit ловит готовый .ipa из его кэша и ставит на телефон.
+# ---------------------------------------------------------------------------
+CFG_GROUP = (Path.home() / "Library" / "Group Containers"
+             / "K36BKF7T3D.group.com.apple.configurator")
+CFG_MOBILEAPPS = CFG_GROUP / "Library" / "Caches" / "Assets" / "TemporaryItems" / "MobileApps"
+CFG_PURCHASES_DB = (CFG_GROUP / "Library" / "Caches" / "Assets"
+                    / "com.apple.configurator.purchases.cache" / "store.sqlite")
+CATCH_DIR = LOCK_DIR / "configurator_catches"
+_catch_seen: set = set()
+
+
+def configurator_present() -> bool:
+    """Установлен ли Configurator (по его групповому контейнеру)."""
+    return CFG_GROUP.exists()
+
+
+def configurator_purchases() -> list:
+    """485 покупок пользователя из базы Configurator — каталог для восстановления.
+    База наполняется, когда человек в Configurator вошёл и открыл «Add Apps»."""
+    if not CFG_PURCHASES_DB.exists():
+        return []
+    try:
+        import sqlite3
+        con = sqlite3.connect("file:%s?mode=ro" % CFG_PURCHASES_DB, uri=True, timeout=3)
+        rows = con.execute(
+            "SELECT ZNAME, ZADAMID, ZBUNDLEID, ZDOWNLOADASSETSIZE, ZIPHONECOMPATIBLE, "
+            "ZBUNDLESHORTVERSIONSTRING FROM ZMOBILEAPP ORDER BY ZNAME COLLATE NOCASE").fetchall()
+        con.close()
+    except Exception:
+        return []
+    out = []
+    for name, adam, bundle, size, iphone, ver in rows:
+        out.append({"name": name or bundle or "", "item_id": adam,
+                    "bundle_id": bundle or "", "size": size or 0,
+                    "iphone": bool(iphone), "version": ver or ""})
+    return out
+
+
+def _configurator_ipa_candidates() -> list:
+    """Свежие .ipa в кэше Configurator (готовые именованные файлы)."""
+    cands = []
+    try:
+        for p in CFG_MOBILEAPPS.glob("*/*/*.ipa"):
+            cands.append(p)
+    except Exception:
+        pass
+    # запасной путь: временная папка загрузчика App Store
+    try:
+        import glob as _glob
+        for s in _glob.glob("/private/var/folders/*/*/C/com.apple.AppStore/*/pre-thinned*.ipa"):
+            cands.append(Path(s))
+    except Exception:
+        pass
+    return cands
+
+
+def grab_configurator_downloads() -> list:
+    """Забирает свежескачанные Configurator'ом .ipa в свою папку. Возвращает
+    список только что пойманных (bundle_id, name, path)."""
+    caught = []
+    CATCH_DIR.mkdir(parents=True, exist_ok=True)
+    for src in _configurator_ipa_candidates():
+        try:
+            key = str(src)
+            if key in _catch_seen:
+                continue
+            st = src.stat()
+            if st.st_size < 500_000:       # ещё качается
+                continue
+            _catch_seen.add(key)
+            identity = _read_ipa_identity(src) or {}
+            bundle = identity.get("bundle_id") or ""
+            # имя файла по приложению, а не по временному имени Configurator
+            base = (identity.get("name") or src.stem)
+            dst = CATCH_DIR / (re.sub(r"[/\\]", "_", base) + ".ipa")
+            shutil.copy2(src, dst)
+            caught.append({"bundle_id": bundle, "name": base, "path": str(dst),
+                           "item_id": identity.get("item_id"),
+                           "size": st.st_size, "at": time.time()})
+        except Exception:
+            continue
+    return caught
+
+
+def configurator_catches() -> list:
+    """Всё, что SideKit уже поймал из Configurator и держит наготове."""
+    out = []
+    if not CATCH_DIR.exists():
+        return out
+    for p in sorted(CATCH_DIR.glob("*.ipa"), key=lambda x: x.stat().st_mtime, reverse=True):
+        identity = _read_ipa_identity(p) or {}
+        out.append({"path": str(p), "name": identity.get("name") or p.stem,
+                    "bundle_id": identity.get("bundle_id") or "",
+                    "item_id": identity.get("item_id"),
+                    "size": p.stat().st_size, "at": p.stat().st_mtime})
+    return out
+
+
+def _configurator_watch_loop():
+    """Фоновый ловец: раз в 2 c проверяет кэш Configurator и забирает свежие .ipa."""
+    global _configurator_last_catch
+    if not IS_MAC:
+        return
+    while True:
+        try:
+            new = grab_configurator_downloads()
+            if new:
+                _configurator_last_catch = {"at": time.time(), "items": new}
+        except Exception:
+            pass
+        time.sleep(2)
+
+
+_configurator_last_catch = None
+
+
+# ---------------------------------------------------------------------------
+# Почтальон .ipa (идея Динара 30.08.2026): один Мак качает .ipa (iMazing/
+# Configurator), а другие компьютеры семьи забирают файл через общий сервер и
+# ставят на свои телефоны. Скачивание — только там, где работает; установка —
+# где угодно. Сервер тот же, что держит общую базу (VPS), транзит с авто-уборкой.
+# ---------------------------------------------------------------------------
+RELAY_URL = "http://195.19.7.162:8900"
+RELAY_TOKEN = "7_aR8EoQKVYR-Ok6QpS_QVAvPk5zz5iTrJA9hhPEQFg"
+RECEIVED_DIR = LOCK_DIR / "received_ipa"
+
+
+def machine_id() -> str:
+    """Короткое имя этой машины для адресации посылок."""
+    import socket as _s
+    host = re.sub(r"[^a-z0-9]", "", _s.gethostname().lower())[:12] or "pc"
+    return ("win-" if IS_WINDOWS else "mac-") + host
+
+
+def _relay_req(path: str, method: str = "GET", data=None, headers=None, timeout=60):
+    import urllib.request
+    h = {"X-Token": RELAY_TOKEN}
+    if headers:
+        h.update(headers)
+    req = urllib.request.Request(RELAY_URL + path, data=data, method=method, headers=h)
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+def relay_send(ipa_path: str, name: str, bundle: str, target: str = "all") -> dict:
+    """Отправляет .ipa на общий сервер, потоком (файлы большие)."""
+    import base64
+    p = Path(ipa_path)
+    if not p.exists():
+        return {"ok": False, "error": "файл не найден"}
+    size = p.stat().st_size
+    try:
+        with open(p, "rb") as fh:
+            r = _relay_req("/ipa", "POST", data=fh, headers={
+                "Content-Length": str(size), "Content-Type": "application/octet-stream",
+                "X-Name": base64.b64encode((name or p.stem).encode("utf-8")).decode(),
+                "X-Bundle": bundle or "", "X-Target": target or "all",
+                "X-From": machine_id()}, timeout=1200)
+            return json.loads(r.read().decode("utf-8"))
+    except Exception as e:
+        return {"ok": False, "error": humanize_apple_error(str(e)) or str(e)[:150]}
+
+
+def relay_list() -> list:
+    """Посылки .ipa, ждущие эту машину (и общие)."""
+    import base64
+    try:
+        r = _relay_req("/ipa/list?target=" + machine_id(), timeout=20)
+        items = json.loads(r.read().decode("utf-8")).get("items", [])
+    except Exception:
+        return []
+    out = []
+    for it in items:
+        nm = it.get("name", "")
+        try:
+            nm = base64.b64decode(nm).decode("utf-8")
+        except Exception:
+            pass
+        out.append({"id": it.get("id"), "name": nm, "bundle": it.get("bundle", ""),
+                    "from": it.get("from", ""), "size": it.get("size", 0)})
+    return out
+
+
+def relay_fetch(iid: str) -> str | None:
+    """Скачивает посылку в свою папку, возвращает путь к .ipa."""
+    RECEIVED_DIR.mkdir(parents=True, exist_ok=True)
+    dst = RECEIVED_DIR / (re.sub(r"[^A-Za-z0-9]", "", iid) + ".ipa")
+    try:
+        r = _relay_req("/ipa/get?id=" + iid, timeout=1200)
+        with open(dst, "wb") as fh:
+            while True:
+                chunk = r.read(1024 * 256)
+                if not chunk:
+                    break
+                fh.write(chunk)
+        return str(dst)
+    except Exception:
+        return None
+
+
+def relay_done(iid: str) -> None:
+    try:
+        _relay_req("/ipa/done?id=" + iid, "POST", data=b"", timeout=20).read()
+    except Exception:
+        pass
+
 
 # Home-screen entries that aren't apps: folders and web clips are identified
 # by a bare 32-character hex string rather than a bundle id.
@@ -2197,7 +2649,7 @@ def _download_succeeded(rc: int, raw: str, out_path: Path) -> bool:
 
 
 def _run_download_job(tool: str, bundle_id: str, purchase: bool, out_path: Path,
-                      udid: str | None = None) -> None:
+                      to_desktop: bool = False, udid: str | None = None) -> None:
     # Deliberately NOT passing --non-interactive: that flag is what makes
     # ipatool skip creating its own progress bar. Download doesn't need a
     # terminal for anything else (no password/2FA prompt happens here,
@@ -2287,18 +2739,32 @@ def _run_download_job(tool: str, bundle_id: str, purchase: bool, out_path: Path,
                 "или региона, с которого выполнен вход."
             )
 
+    final_path = str(out_path)
+    # Выгрузка «на Рабочий стол»: файл скачан в доступную папку, теперь кладём
+    # его на стол через Finder (у него доступ есть даже без FDA у движка).
+    if ok and to_desktop:
+        moved = move_to_desktop(str(out_path))
+        if moved:
+            final_path = moved
     with _download_lock:
         _download_state.update({
             "running": False,
             "status": "done" if ok else "error",
             "percent": 100 if ok else _download_state.get("percent", 0),
-            "path": str(out_path) if ok else None,
+            "path": final_path if ok else None,
             "error": error_text,
             "raw": raw,
         })
+    # Показать выгруженный .ipa в Finder — и на столе, и в запасной папке.
+    if ok:
+        try:
+            reveal_in_finder(final_path)
+        except Exception:
+            pass
 
 
-def ipatool_download(bundle_id: str, purchase: bool, dest_path: str | None) -> dict:
+def ipatool_download(bundle_id: str, purchase: bool, dest_path: str | None,
+                     to_desktop: bool = False) -> dict:
     """Starts the download as a background job instead of blocking, so the
     frontend can poll /api/download-progress for a real percentage instead
     of staring at an indeterminate spinner."""
@@ -2315,9 +2781,10 @@ def ipatool_download(bundle_id: str, purchase: bool, dest_path: str | None) -> d
         _download_state.update({
             "running": True, "bundle_id": bundle_id, "percent": 0,
             "downloaded": None, "total": None, "status": "running",
-            "path": str(out_path), "error": None, "raw": "",
+            "path": str(out_path), "error": None, "raw": "", "to_desktop": bool(to_desktop),
         })
-    threading.Thread(target=_run_download_job, args=(tool, bundle_id, purchase, out_path), daemon=True).start()
+    threading.Thread(target=_run_download_job,
+                     args=(tool, bundle_id, purchase, out_path, to_desktop), daemon=True).start()
     return {"ok": True, "started": True}
 
 
@@ -3148,6 +3615,28 @@ def reveal_in_finder(path: str) -> dict:
         return {"ok": False, "error": str(e)}
 
 
+def move_to_desktop(src: str) -> str | None:
+    """Кладёт файл на Рабочий стол. На Маке — руками Finder (у него доступ к
+    диску есть всегда), поэтому работает даже если у движка нет «Полного доступа
+    к диску». На Windows — обычным переносом. Возвращает путь на столе или None."""
+    try:
+        src_p = Path(src)
+        dst = desktop_dir() / src_p.name
+        try:
+            shutil.move(str(src_p), str(dst))   # вдруг доступ есть — быстро и без Finder
+            return str(dst)
+        except Exception:
+            if IS_WINDOWS:
+                return None
+        script = ('set src to POSIX file "%s"\n'
+                  'tell application "Finder" to move src to (path to desktop folder) with replacing'
+                  % str(src_p))
+        subprocess.run(["osascript", "-e", script], capture_output=True, timeout=30, **NO_CONSOLE)
+        return str(dst) if dst.exists() else None
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # zsign-backed action (only needed for non-App-Store ipas)
 # ---------------------------------------------------------------------------
@@ -3265,6 +3754,16 @@ class Handler(BaseHTTPRequestHandler):
                     # one of them disappears later.
                     remember_installed_apps(bundle_ids, query.get("udid"))
                 self._send_json(result)
+            elif path == "/api/configurator":
+                self._send_json({
+                    "present": configurator_present(),
+                    "catches": configurator_catches(),
+                    "purchases_count": len(configurator_purchases()),
+                })
+            elif path == "/api/configurator-purchases":
+                self._send_json({"apps": configurator_purchases()})
+            elif path == "/api/relay-list":
+                self._send_json({"machine": machine_id(), "items": relay_list()})
             elif path == "/api/vanished-apps":
                 remember_installed_apps(None, query.get("udid"))
                 result = list_vanished_apps(query.get("udid"), query.get("all") == "1")
@@ -3351,16 +3850,17 @@ class Handler(BaseHTTPRequestHandler):
                                              body.get("auth_code"), bool(body.get("force"))))
             elif path == "/api/download":
                 dest = body.get("dest_path")
+                want_desktop = False
                 if not dest and body.get("to_desktop"):
-                    # Выгрузка без вопросов «куда сохранить»: сразу на
-                    # Рабочий стол, под названием приложения.
-                    folder = desktop_dir()
-                    problem = check_writable_dir(folder)
-                    if problem:
-                        self._send_json({"ok": False, "error": problem})
-                        return
-                    dest = str(auto_ipa_path(body.get("name", ""), body.get("bundle_id", "")))
-                self._send_json(ipatool_download(body.get("bundle_id", ""), bool(body.get("purchase")), dest))
+                    # Выгрузка «на Рабочий стол». Качаем ВСЕГДА в свою доступную
+                    # папку (движок туда точно пишет), а на стол кладём потом
+                    # через Finder — у него доступ есть даже без FDA у движка.
+                    want_desktop = True
+                    EXPORTED_DIR.mkdir(parents=True, exist_ok=True)
+                    safe = re.sub(r"[^\w .()\-]+", "_", (body.get("name") or body.get("bundle_id") or "app"))
+                    dest = str(EXPORTED_DIR / (safe + ".ipa"))
+                self._send_json(ipatool_download(body.get("bundle_id", ""), bool(body.get("purchase")),
+                                                 dest, want_desktop))
             elif path == "/api/apply-update":
                 self._send_json(apply_update_now())
             elif path == "/api/report":
@@ -3381,6 +3881,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(reveal_in_finder(body.get("path", "")))
             elif path == "/api/install":
                 self._send_json(install_ipa(body.get("ipa_path", ""), body.get("udid")))
+            elif path == "/api/relay-send":
+                self._send_json(relay_send(body.get("ipa_path", ""), body.get("name", ""),
+                                           body.get("bundle", ""), body.get("target", "all")))
+            elif path == "/api/relay-install":
+                iid = body.get("id", "")
+                p = relay_fetch(iid)
+                if not p:
+                    self._send_json({"ok": False, "error": "не удалось скачать посылку с сервера"})
+                else:
+                    res = install_ipa(p, body.get("udid"))
+                    # чистим посылку с сервера сразу — файл уже у нас и ставится
+                    if res.get("ok") or res.get("running"):
+                        relay_done(iid)
+                    self._send_json(res)
             elif path == "/api/restore":
                 item_id = body.get("item_id")
                 try:
@@ -3970,9 +4484,62 @@ def remember_ipatool_choice(use_legacy: bool) -> None:
         pass
 
 
+ANISETTE_GEN = BIN_DIR / "anisette"
+ANISETTE_IPATOOL = BIN_DIR / "ipatool-anisette"
+
+
+def anisette_ipatool() -> str | None:
+    """Наш пересобранный ipatool с anisette. Пока это ЛАБОРАТОРИЯ: старый вход
+    Apple глухо блокирует (пустой 403) даже с anisette, настоящий путь -
+    GrandSlam, ещё не готов. Поэтому включается только флагом, чтобы боевой
+    SideKit работал на обычном ipatool."""
+    flag = LOCK_DIR / "anisette_lab.on"
+    if IS_MAC and ANISETTE_IPATOOL.exists() and flag.exists():
+        return str(ANISETTE_IPATOOL)
+    return None
+
+
+def refresh_anisette() -> bool:
+    """Берёт свежее anisette с Мака и кладёт в окружение процесса. ipatool
+    подхватит его сам при следующем запуске. Код меняется раз в ~30 c, поэтому
+    обновляем прямо перед входом."""
+    if not (IS_MAC and ANISETTE_GEN.exists()):
+        return False
+    try:
+        out = subprocess.run([str(ANISETTE_GEN)], capture_output=True, text=True,
+                             timeout=20, **NO_CONSOLE)
+        data = json.loads(out.stdout or "{}")
+        md = data.get("X-Apple-I-MD"); mdm = data.get("X-Apple-I-MD-M")
+        if not md or not mdm:
+            return False
+        srl = data.get("X-Apple-I-SRL-NO", "")
+        os.environ["SIDEKIT_ANI_MD"] = md
+        os.environ["SIDEKIT_ANI_MDM"] = mdm
+        os.environ["SIDEKIT_ANI_SRL"] = srl
+        # устойчивый идентификатор машины из серийника
+        import hashlib, uuid
+        os.environ["SIDEKIT_ANI_DEVID"] = str(
+            uuid.UUID(hashlib.md5((srl + " sidekit").encode()).hexdigest())).upper()
+        return True
+    except Exception as e:
+        remember_error("anisette", str(e)[:150])
+        return False
+
+
 def active_ipatool() -> str | None:
     """Тот ipatool, которым работаем сейчас. Важно, чтобы он был один и тот же
     везде: сессия входа хранится в связке ключей в своём формате."""
+    # Пропатченный ipatool (2.3.2-sapfix): пробивает 403, которым Apple с осени
+    # 2026 глушит старый вход. Он главный, если есть. Обычный проверенно ловит 403.
+    fixed = BIN_DIR / ("ipatool-fixed.exe" if IS_WINDOWS else "ipatool-fixed")
+    if fixed.exists():
+        return str(fixed)
+    user_fixed = USER_BIN_DIR / ("ipatool-fixed.exe" if IS_WINDOWS else "ipatool-fixed")
+    if user_fixed.exists():
+        return str(user_fixed)
+    ani = anisette_ipatool()
+    if ani:
+        return ani                    # на Маке — наш вход через anisette
     if preferred_ipatool_is_legacy():
         spare = legacy_ipatool() or ensure_legacy_ipatool()
         if spare:
@@ -4064,6 +4631,54 @@ def ensure_legacy_ipatool() -> Path | None:
         return target
     except Exception as e:
         remember_error("докачка запасного ipatool", str(e))
+        return None
+
+
+# Рабочий ipatool (sapfix) — пробивает 403, которым Apple с осени 2026 глушит
+# старый вход. Возится не обновлением (оно тащит только 2 файла), а докачкой
+# по адресу репозитория, с проверкой отпечатка.
+FIXED_IPATOOL_SHA = {
+    "ipatool-fixed-mac-arm64": "f81f07b793421cdf08b4e210dc0026ca6dd077ce717e04d6c794b1b7045d757a",
+    "ipatool-fixed-mac-amd64": "57d188babf680accb803aa1eca2bf91fb1f0724176ab88f7af37a5a366378dba",
+    "ipatool-fixed.exe":       "845f9563cd4c4a8baf5b3682184e985c978607a7d1f507faa7644cb6519e865a",
+}
+
+
+def _fixed_ipatool_asset() -> str:
+    """Имя файла рабочего ipatool под эту машину (архитектура важна)."""
+    if IS_WINDOWS:
+        return "ipatool-fixed.exe"
+    arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "amd64"
+    return "ipatool-fixed-mac-" + arch
+
+
+def ensure_fixed_ipatool() -> Path | None:
+    """Кладёт рабочий ipatool в папку данных, если его ещё нет на этой машине."""
+    bundled = BIN_DIR / ("ipatool-fixed.exe" if IS_WINDOWS else "ipatool-fixed")
+    if bundled.exists():
+        return bundled                      # уже в комплекте (сборка Мака)
+    dst = USER_BIN_DIR / ("ipatool-fixed.exe" if IS_WINDOWS else "ipatool-fixed")
+    name = _fixed_ipatool_asset()
+    want = FIXED_IPATOOL_SHA[name]
+    import hashlib
+    if dst.exists():
+        try:
+            if hashlib.sha256(dst.read_bytes()).hexdigest() == want:
+                return dst
+        except Exception:
+            pass
+    try:
+        data = _fetch(UPDATE_BASE + name, timeout=300)
+        if hashlib.sha256(data).hexdigest() != want:
+            remember_error("докачка рабочего ipatool", "отпечаток файла не совпал")
+            return None
+        USER_BIN_DIR.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(data)
+        if not IS_WINDOWS:
+            os.chmod(dst, 0o755)
+        return dst
+    except Exception as e:
+        remember_error("докачка рабочего ipatool", str(e)[:150])
         return None
 
 
@@ -4811,6 +5426,10 @@ def main():
             seed_known_apps()
         except Exception:
             pass
+        try:
+            ensure_fixed_ipatool()      # рабочий ipatool на эту машину, если его нет
+        except Exception:
+            pass
         while True:
             check_for_updates()
             try:
@@ -4824,6 +5443,9 @@ def main():
             time.sleep(1800)
 
     threading.Thread(target=background_chores, daemon=True).start()
+    # Ловец скачиваний из Apple Configurator (на Маке): забирает .ipa из его кэша.
+    if IS_MAC:
+        threading.Thread(target=_configurator_watch_loop, daemon=True).start()
 
     # Дошли до рабочего состояния - значит версия годная, метку снимаем.
     clear_boot_attempt()

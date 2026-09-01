@@ -114,7 +114,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-08-31.121-release"
+SERVER_VERSION = "2026-08-31.122-real-ipatool"
 
 
 # ---------------------------------------------------------------------------
@@ -4637,10 +4637,13 @@ def ensure_legacy_ipatool() -> Path | None:
 # Рабочий ipatool (sapfix) — пробивает 403, которым Apple с осени 2026 глушит
 # старый вход. Возится не обновлением (оно тащит только 2 файла), а докачкой
 # по адресу репозитория, с проверкой отпечатка.
+# Отпечатки РАСПАКОВАННЫХ бинарников (рабочий ipatool bmrng, main-d5d0b56, с
+# ActionSignature). На сервере лежат сжатыми (.gz), чтобы влезть в веб-загрузку
+# GitHub (< 25 МБ); движок распакует и сверит отпечаток именно распакованного.
 FIXED_IPATOOL_SHA = {
-    "ipatool-fixed-mac-arm64": "f81f07b793421cdf08b4e210dc0026ca6dd077ce717e04d6c794b1b7045d757a",
-    "ipatool-fixed-mac-amd64": "57d188babf680accb803aa1eca2bf91fb1f0724176ab88f7af37a5a366378dba",
-    "ipatool-fixed.exe":       "845f9563cd4c4a8baf5b3682184e985c978607a7d1f507faa7644cb6519e865a",
+    "ipatool-fixed-mac-arm64": "8510aaf50d0e5f90ccf0b55c87242edae6f203f141615266006e86b433e6028f",
+    "ipatool-fixed-mac-amd64": "011072b2f540fd60d2fcd8bd1ff9c41c2616275d30a0024fdf740e48b6d96da4",
+    "ipatool-fixed.exe":       "8ea32800b1240ace81c3e573c76f35c63437e3aa89c6f5926aa1ceda69877374",
 }
 
 
@@ -4653,14 +4656,15 @@ def _fixed_ipatool_asset() -> str:
 
 
 def ensure_fixed_ipatool() -> Path | None:
-    """Кладёт рабочий ipatool в папку данных, если его ещё нет на этой машине."""
+    """Кладёт рабочий ipatool в папку данных, если его ещё нет на этой машине.
+    Качает сжатый .gz с адреса обновлений, распаковывает, сверяет отпечаток."""
     bundled = BIN_DIR / ("ipatool-fixed.exe" if IS_WINDOWS else "ipatool-fixed")
     if bundled.exists():
         return bundled                      # уже в комплекте (сборка Мака)
     dst = USER_BIN_DIR / ("ipatool-fixed.exe" if IS_WINDOWS else "ipatool-fixed")
     name = _fixed_ipatool_asset()
     want = FIXED_IPATOOL_SHA[name]
-    import hashlib
+    import hashlib, gzip
     if dst.exists():
         try:
             if hashlib.sha256(dst.read_bytes()).hexdigest() == want:
@@ -4668,7 +4672,8 @@ def ensure_fixed_ipatool() -> Path | None:
         except Exception:
             pass
     try:
-        data = _fetch(UPDATE_BASE + name, timeout=300)
+        packed = _fetch(UPDATE_BASE + name + ".gz", timeout=300)
+        data = gzip.decompress(packed)
         if hashlib.sha256(data).hexdigest() != want:
             remember_error("докачка рабочего ipatool", "отпечаток файла не совпал")
             return None

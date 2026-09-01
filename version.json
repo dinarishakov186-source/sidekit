@@ -1,8 +1,8 @@
 {
-  "version": "2026-08-31.121-release",
-  "notes": "рабочий вход/скачивание (ipatool sapfix, пробивает 403); выгрузка на Рабочий стол; почтальон .ipa между машинами; докачка рабочего ipatool на Windows/Intel",
+  "version": "2026-08-31.122-real-ipatool",
+  "notes": "рабочий ipatool bmrng (main-d5d0b56, с ActionSignature) под все платформы; вход/скачивание/выгрузка работают на Mac/Windows/Intel",
   "sha256": {
-    "server.py": "a6d22c5d46b4e491bb4aea018777946892861f95415616eb6efc5ddd015291fb",
+    "server.py": "ea84f013cee949c70f54fa9cadfdd6fdf56e9d92d74ad98f68f67ea958e59656",
     "index.html": "b690e9f01ad0ca15a19dbc5c274250c8ba1d9daf06e87e6974189186a9936d3f"
   }
 }

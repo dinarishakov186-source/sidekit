@@ -114,7 +114,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-08-31.122-real-ipatool"
+SERVER_VERSION = "2026-09-01.123-trust-good-binary"
 
 
 # ---------------------------------------------------------------------------
@@ -4532,11 +4532,16 @@ def active_ipatool() -> str | None:
     # Пропатченный ipatool (2.3.2-sapfix): пробивает 403, которым Apple с осени
     # 2026 глушит старый вход. Он главный, если есть. Обычный проверенно ловит 403.
     fixed = BIN_DIR / ("ipatool-fixed.exe" if IS_WINDOWS else "ipatool-fixed")
-    if fixed.exists():
+    if _good_fixed(fixed):
         return str(fixed)
     user_fixed = USER_BIN_DIR / ("ipatool-fixed.exe" if IS_WINDOWS else "ipatool-fixed")
-    if user_fixed.exists():
+    if _good_fixed(user_fixed):
         return str(user_fixed)
+    # Вшитый бинарник оказался сломанной сборкой (старый Windows-установщик) —
+    # докачиваем заведомо рабочий (.gz с проверкой отпечатка) и берём его.
+    got = ensure_fixed_ipatool()
+    if got and _good_fixed(Path(got)):
+        return str(got)
     ani = anisette_ipatool()
     if ani:
         return ani                    # на Маке — наш вход через anisette
@@ -4646,6 +4651,35 @@ FIXED_IPATOOL_SHA = {
     "ipatool-fixed.exe":       "8ea32800b1240ace81c3e573c76f35c63437e3aa89c6f5926aa1ceda69877374",
 }
 
+# Все заведомо рабочие бинарники ipatool (с заголовком ActionSignature, который
+# пробивает вход осенью 2026). Движок доверяет вшитому в комплект файлу ТОЛЬКО
+# если его отпечаток здесь: иначе старый Windows-установщик, куда попала
+# сломанная сборка, заставлял брать её и никогда не качать рабочую.
+_KNOWN_GOOD_FIXED = set(FIXED_IPATOOL_SHA.values()) | {
+    # bmrng 0.1.2 (2.3.2-sapfix.1), вшит в Mac-сборку у Динара — проверенно рабочий
+    "12f68bc6eea9f7ca2eaca9ea02f18ff2fd89b6a5c08dae4f617837b5afbf8ee5",
+}
+_good_fixed_cache: dict = {}
+
+
+def _good_fixed(path: Path) -> bool:
+    """True, только если файл на месте И его отпечаток — из списка заведомо
+    рабочих. Отпечаток считается один раз на (путь, размер, дату)."""
+    try:
+        if not path.exists():
+            return False
+        st = path.stat()
+        key = (str(path), st.st_size, int(st.st_mtime))
+        if key in _good_fixed_cache:
+            return _good_fixed_cache[key]
+        import hashlib
+        good = hashlib.sha256(path.read_bytes()).hexdigest() in _KNOWN_GOOD_FIXED
+        _good_fixed_cache.clear()
+        _good_fixed_cache[key] = good
+        return good
+    except Exception:
+        return False
+
 
 def _fixed_ipatool_asset() -> str:
     """Имя файла рабочего ipatool под эту машину (архитектура важна)."""
@@ -4659,8 +4693,8 @@ def ensure_fixed_ipatool() -> Path | None:
     """Кладёт рабочий ipatool в папку данных, если его ещё нет на этой машине.
     Качает сжатый .gz с адреса обновлений, распаковывает, сверяет отпечаток."""
     bundled = BIN_DIR / ("ipatool-fixed.exe" if IS_WINDOWS else "ipatool-fixed")
-    if bundled.exists():
-        return bundled                      # уже в комплекте (сборка Мака)
+    if _good_fixed(bundled):
+        return bundled                      # рабочий bmrng уже в комплекте (Мак)
     dst = USER_BIN_DIR / ("ipatool-fixed.exe" if IS_WINDOWS else "ipatool-fixed")
     name = _fixed_ipatool_asset()
     want = FIXED_IPATOOL_SHA[name]

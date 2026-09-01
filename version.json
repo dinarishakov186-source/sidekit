@@ -1,8 +1,8 @@
 {
-  "version": "2026-08-31.122-real-ipatool",
-  "notes": "рабочий ipatool bmrng (main-d5d0b56, с ActionSignature) под все платформы; вход/скачивание/выгрузка работают на Mac/Windows/Intel",
+  "version": "2026-09-01.123-trust-good-binary",
+  "notes": "движок доверяет вшитому ipatool только с верным отпечатком; сломанную сборку из старого Windows-установщика отвергает и докачивает рабочий bmrng",
   "sha256": {
-    "server.py": "ea84f013cee949c70f54fa9cadfdd6fdf56e9d92d74ad98f68f67ea958e59656",
+    "server.py": "faace23f10f511324051ef23a0f8d776361bfe240b653a43bede182365996060",
     "index.html": "b690e9f01ad0ca15a19dbc5c274250c8ba1d9daf06e87e6974189186a9936d3f"
   }
 }

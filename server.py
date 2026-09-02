@@ -114,7 +114,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-09-01.123-trust-good-binary"
+SERVER_VERSION = "2026-09-02.125-kill-switch"
 
 
 # ---------------------------------------------------------------------------
@@ -1365,6 +1365,8 @@ def ipatool_login(email: str, password: str, auth_code: str | None, force: bool 
     if ok:
         _write_login_state(email)
         _invalidate_auth_status()
+        # Обновить отметку на рубильнике, чтобы новый Apple ID сразу попал в список.
+        threading.Thread(target=guard_register, daemon=True).start()
         return {"ok": True, "raw": combined}
 
     remember_error("вход в Apple ID", combined)
@@ -1547,7 +1549,9 @@ def device_app_item_id(bundle_id: str, udid: str | None) -> int | None:
         try:
             data = json.loads(line)
             if data.get("ok") and data.get("item_id"):
-                return int(data["item_id"])
+                iid = int(data["item_id"])
+                _remember_item_id(bundle_id, iid)   # запомнить на будущее (для выгрузки без телефона)
+                return iid
         except Exception:
             pass
     return None
@@ -1729,6 +1733,109 @@ def _relay_req(path: str, method: str = "GET", data=None, headers=None, timeout=
     return urllib.request.urlopen(req, timeout=timeout)
 
 
+# ---------------------------------------------------------------------------
+# Рубильник: каждая копия отмечается на сервере-рубильнике (отдельная служба,
+# порт 8901) и узнаёт, не забанена ли она. Сбой связи НЕ блокирует (fail-open):
+# держим последний известный вердикт, чтобы сбой сервера не запер своих.
+# ---------------------------------------------------------------------------
+GUARD_URL = os.environ.get("SIDEKIT_GUARD_URL", "http://195.19.7.162:8901")
+INSTALL_ID_FILE = LOCK_DIR / "install_id"
+ACCESS_CACHE_FILE = LOCK_DIR / "access.json"
+_access = {"allowed": True, "banned": False, "reason": "", "checked": 0}
+
+
+def install_id() -> str:
+    """Стойкий уникальный номер этой установки (для рубильника). Отличает даже
+    машины с одинаковым именем; переживает перезапуски."""
+    try:
+        if INSTALL_ID_FILE.exists():
+            v = INSTALL_ID_FILE.read_text(encoding="utf-8").strip()
+            if v:
+                return v
+    except Exception:
+        pass
+    import uuid
+    v = machine_id() + "-" + uuid.uuid4().hex[:12]
+    try:
+        LOCK_DIR.mkdir(parents=True, exist_ok=True)
+        INSTALL_ID_FILE.write_text(v, encoding="utf-8")
+    except Exception:
+        pass
+    return v
+
+
+def _load_access_cache() -> None:
+    try:
+        d = json.loads(ACCESS_CACHE_FILE.read_text(encoding="utf-8"))
+        _access.update({"allowed": bool(d.get("allowed", True)),
+                        "banned": bool(d.get("banned", False)),
+                        "reason": str(d.get("reason", "")),
+                        "checked": int(d.get("checked", 0))})
+    except Exception:
+        pass
+
+
+def _save_access_cache() -> None:
+    try:
+        LOCK_DIR.mkdir(parents=True, exist_ok=True)
+        ACCESS_CACHE_FILE.write_text(json.dumps({
+            "allowed": _access["allowed"], "banned": _access["banned"],
+            "reason": _access["reason"], "checked": _access["checked"]}),
+            encoding="utf-8")
+    except Exception:
+        pass
+
+
+def guard_register() -> None:
+    """Отмечается на рубильнике и обновляет вердикт доступа. Тихо переживает
+    любой сбой связи, оставляя прошлый вердикт (fail-open)."""
+    import urllib.request, socket as _s
+    try:
+        st = _read_login_state()
+    except Exception:
+        st = {}
+    payload = json.dumps({
+        "install_id": install_id(),
+        "machine_id": machine_id(),
+        "host": (_s.gethostname() or "")[:64],
+        "platform": "windows" if IS_WINDOWS else ("mac" if IS_MAC else "other"),
+        "version": SERVER_VERSION,
+        "apple_id": st.get("email", ""),
+    }).encode("utf-8")
+    try:
+        req = urllib.request.Request(GUARD_URL + "/reg", data=payload, method="POST",
+                                     headers={"X-Token": RELAY_TOKEN,
+                                              "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            d = json.loads(r.read().decode("utf-8"))
+        if d.get("ok"):
+            allowed = bool(d.get("allowed", True))
+            _access.update({"allowed": allowed, "banned": bool(d.get("banned", False)),
+                            "reason": "" if allowed else "Доступ к SideKit закрыт администратором.",
+                            "checked": int(time.time())})
+            _save_access_cache()
+    except Exception:
+        pass                                # fail-open
+
+
+def access_allowed() -> bool:
+    return bool(_access.get("allowed", True))
+
+
+def access_block_payload() -> dict:
+    return {"ok": False, "blocked": True,
+            "error": _access.get("reason") or "Доступ к SideKit закрыт администратором."}
+
+
+_load_access_cache()
+
+# Действия, которые рубильник закрывает у забаненной машины. Остальное
+# (статус, диагностика, выход) остаётся доступным, чтобы приложение могло
+# показать, что доступ закрыт, и его можно было проверить.
+_GUARDED_PATHS = {"/api/download", "/api/install", "/api/relay-install",
+                  "/api/relay-send", "/api/restore", "/api/sign"}
+
+
 def relay_send(ipa_path: str, name: str, bundle: str, target: str = "all") -> dict:
     """Отправляет .ipa на общий сервер, потоком (файлы большие)."""
     import base64
@@ -1810,6 +1917,32 @@ def save_known_apps(data: dict) -> None:
         KNOWN_APPS_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
+
+
+def _remember_item_id(bundle_id: str, item_id: int, name: str | None = None) -> None:
+    """Запоминает числовой App Store ID приложения. Тогда выгрузка/возврат
+    делистнутого приложения работает потом даже без подключённого телефона -
+    ID уже в памяти SideKit, не надо каждый раз читать его с устройства."""
+    if not bundle_id or not item_id:
+        return
+    try:
+        known = load_known_apps()
+        entry = known.get(bundle_id, {})
+        entry["item_id"] = int(item_id)
+        if name and not entry.get("name"):
+            entry["name"] = name
+        known[bundle_id] = entry
+        save_known_apps(known)
+    except Exception:
+        pass
+
+
+def _known_item_id(bundle_id: str) -> int | None:
+    try:
+        v = (load_known_apps().get(bundle_id) or {}).get("item_id")
+        return int(v) if v else None
+    except Exception:
+        return None
 
 
 _METADATA_SCRIPT = r'''
@@ -2686,7 +2819,16 @@ def _run_download_job(tool: str, bundle_id: str, purchase: bool, out_path: Path,
     # what fails; downloading by numeric id still works if the account has a
     # license, and the connected iPhone can tell us that id.
     if not ok and "app not found" in raw.lower():
-        item_id = device_app_item_id(bundle_id, udid)
+        # Числовой ID ищем по цепочке: подключённый телефон → память SideKit
+        # (её пополняет и телефон, и восстановление) → каталог (вдруг вернулось
+        # в продажу / другой регион). Память — чтобы выгрузка работала и без
+        # подключённого телефона: раньше без него тут был тупик.
+        item_id = device_app_item_id(bundle_id, udid) or _known_item_id(bundle_id)
+        if not item_id:
+            found = catalogue_lookup(bundle_id)
+            if found:
+                item_id = found["item_id"]
+                _remember_item_id(bundle_id, item_id, found.get("name"))
         if item_id:
             with _download_lock:
                 _download_state.update({"percent": 0, "downloaded": None, "total": None})
@@ -2696,12 +2838,14 @@ def _run_download_job(tool: str, bundle_id: str, purchase: bool, out_path: Path,
                 )
                 raw = raw + "\n" + retry_raw
                 ok = _download_succeeded(rc, retry_raw, out_path)
+                if ok:
+                    _remember_item_id(bundle_id, item_id)
             except Exception as e:
                 raw = raw + f"\nповтор по App Store ID {item_id} не удался: {e}"
         else:
             raw += (
-                "\nЭтого приложения нет в каталоге App Store, и найти его "
-                "App Store ID на подключённом iPhone тоже не вышло."
+                "\nЭтого приложения нет в каталоге App Store, его App Store ID "
+                "не нашёлся ни на подключённом iPhone, ни в памяти SideKit."
             )
 
     error_text = None
@@ -3727,6 +3871,8 @@ class Handler(BaseHTTPRequestHandler):
                 status = get_status()
                 status["version"] = SERVER_VERSION
                 status["update"] = update_note()
+                status["access"] = {"allowed": access_allowed(),
+                                    "reason": _access.get("reason", "")}
                 self._send_json(status)
             elif path == "/api/devices":
                 devices = list_devices()
@@ -3838,6 +3984,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             path = self.path.split("?")[0]
             body = self._read_json_body()
+
+            if path in _GUARDED_PATHS and not access_allowed():
+                return self._send_json(access_block_payload())
 
             if path == "/api/setup":
                 self._send_json(run_setup())
@@ -5469,6 +5618,10 @@ def main():
             ensure_fixed_ipatool()      # рабочий ipatool на эту машину, если его нет
         except Exception:
             pass
+        try:
+            guard_register()            # отметиться на рубильнике + узнать вердикт
+        except Exception:
+            pass
         while True:
             check_for_updates()
             try:
@@ -5477,6 +5630,10 @@ def main():
                 pass
             try:
                 sync_apps_db()              # основной путь - свой сервер
+            except Exception:
+                pass
+            try:
+                guard_register()            # обновить вердикт рубильника (бан/разбан)
             except Exception:
                 pass
             time.sleep(1800)

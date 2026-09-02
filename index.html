@@ -1144,6 +1144,11 @@ let deviceSignature = "";
 
 async function loadDevices(attempt = 0) {
   clearTimeout(deviceScanTimer);
+  // Окно свёрнуто/неактивно — телефон не опрашиваем вовсе (экономия батареи:
+  // каждый опрос запускает тяжёлые процессы). Возобновится сразу, когда окно
+  // снова станет активным (обработчик visibilitychange ниже). Выгрузку/установку
+  // это НЕ трогает — они идут в движке отдельным потоком и продолжаются в фоне.
+  if (document.hidden) { deviceScanTimer = null; return; }
   // Пока идёт скачивание или установка, телефон занят - лезть к нему с
   // опросом нельзя, разговаривать с ним умеет только одна программа за раз.
   if (deviceOpBusy) {
@@ -1210,6 +1215,13 @@ async function loadDevices(attempt = 0) {
   document.getElementById("diagnoseBtn").style.display = "none";
   if (!activeUdid && devices.length) selectDevice(devices[0].udid);
 }
+
+// Свернули/переключили окно — опрос телефона замирает (экономия батареи).
+// Вернулись к окну — сразу обновляем список, не дожидаясь таймера.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) { clearTimeout(deviceScanTimer); deviceScanTimer = null; }
+  else { loadDevices(0); }
+});
 
 function selectDevice(udid) {
   if (activeUdid === udid) return;

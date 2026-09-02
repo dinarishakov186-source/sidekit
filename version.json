@@ -1,8 +1,8 @@
 {
-  "version": "2026-09-02.125-kill-switch",
-  "notes": "рубильник: каждая копия отмечается на сервере-рубильнике (порт 8901) и блокируется, если забанена; выгрузка помнит App Store ID; список установок смотрится в RemoteKit Console",
+  "version": "2026-09-03.127-status-cache",
+  "notes": "экономия батареи + скорость: опрос телефона замирает в фоне; тяжёлое чтение устройства и проверка pymobiledevice3 кешируются. Функционал не тронут.",
   "sha256": {
-    "server.py": "bac7a99a95a69dc0786ff6e772bf8caac3c64f1a0cb291b5e99f074c680f3f52",
-    "index.html": "b690e9f01ad0ca15a19dbc5c274250c8ba1d9daf06e87e6974189186a9936d3f"
+    "server.py": "bb950741c19891032bed3c0640fb4e5f61bc1f656e824892be7264947677f34a",
+    "index.html": "b6d7be23b597f5e20557b67db7c5cd42ac18feec12ea5903a97e3ca829c69d0b"
   }
 }

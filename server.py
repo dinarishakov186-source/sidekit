@@ -114,7 +114,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-09-02.125-kill-switch"
+SERVER_VERSION = "2026-09-03.127-status-cache"
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +225,20 @@ def find_tool(name: str) -> str | None:
     return shutil.which(name)
 
 
+_pmd3_ok_cache = {"ok": None, "time": 0.0}
+
+
 def has_pymobiledevice3() -> bool:
+    # Проверка запускает Python-процесс (импорт библиотеки) — не самый дешёвый
+    # вызов, а /api/status дёргается при загрузке, после входа и раз в минуту.
+    # Результат в рамках сессии не меняется: раз заработало — так и будет.
+    # Поэтому положительный ответ кешируем навсегда, а отрицательный
+    # перепроверяем не чаще раза в 30 с (чтобы после доустановки он «ожил»).
+    c = _pmd3_ok_cache
+    if c["ok"] is True:
+        return True
+    if c["ok"] is False and (time.time() - c["time"]) < 30:
+        return False
     try:
         # Import something deep enough to actually exercise the compiled
         # dependencies (cryptography's Rust extension in particular) - a
@@ -236,9 +249,11 @@ def has_pymobiledevice3() -> bool:
             [PYTHON_EXE, "-c", "import pymobiledevice3.lockdown"],
             capture_output=True,
             timeout=20, **NO_CONSOLE)
-        return result.returncode == 0
+        ok = result.returncode == 0
     except Exception:
-        return False
+        ok = False
+    c["ok"], c["time"] = ok, time.time()
+    return ok
 
 
 def get_status() -> dict:
@@ -2947,6 +2962,9 @@ def list_downloaded_ipas() -> list:
 # pymobiledevice3-backed actions
 # ---------------------------------------------------------------------------
 
+_dev_detail_cache: dict = {"sig": None, "devices": None}
+
+
 def list_devices() -> dict:
     # --usb restricts this to devices physically plugged in right now.
     # Without it, usbmuxd also reports devices it remembers over Wi-Fi
@@ -2977,6 +2995,17 @@ def list_devices() -> dict:
         # Nothing physically detected at the USB level - a real "not
         # connected / bad cable" situation, not a trust problem.
         return {"ok": rc_simple == 0, "devices": [], "raw": out_simple + err_simple}
+
+    # Экономия батареи: детальное чтение (usbmux list) — самый тяжёлый вызов
+    # (запуск ещё одного Python-процесса). Пока набор подключённых устройств не
+    # изменился и доверие у всех уже подтверждено, повторно его не делаем —
+    # отдаём прошлый результат. Как только состав меняется или где-то ждёт
+    # «Доверять» — читаем заново, чтобы поймать смену.
+    sig = (tuple(cable), tuple(over_wifi))
+    c = _dev_detail_cache
+    if (c.get("sig") == sig and c.get("devices") is not None
+            and not any(d.get("needs_trust") for d in c["devices"])):
+        return {"ok": True, "devices": [dict(d) for d in c["devices"]], "raw": "cache"}
 
     # Step 2: try to get friendly details (name/model/iOS version), which
     # DOES require the pairing/trust dialog to have been accepted. If this
@@ -3018,6 +3047,8 @@ def list_devices() -> dict:
                 "over_wifi": udid in over_wifi,
             })
 
+    _dev_detail_cache["sig"] = sig
+    _dev_detail_cache["devices"] = [dict(d) for d in devices]
     return {"ok": True, "devices": devices, "raw": out_full + err_full}
 
 

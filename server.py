@@ -114,7 +114,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-09-03.127-status-cache"
+SERVER_VERSION = "2026-09-09.129-vps-mirror"
 
 
 # ---------------------------------------------------------------------------
@@ -1451,6 +1451,12 @@ APPLE_ERROR_HINTS = (
                 "Apple ID его раньше не скачивал. Поможет только файл .ipa."),
     ("403", "Apple отказала в доступе. Попробуй ещё раз через минуту."),
     ("429", "Слишком часто обращались к Apple. Подожди пару минут."),
+    ("invalid response", "Apple вернула невнятный ответ на это приложение. Обычно "
+                         "это значит, что оно не привязано к ЭТОМУ Apple ID (под ним "
+                         "не скачивалось — иконка могла прийти с бэкапа или другого "
+                         "аккаунта), поэтому Apple его не отдаёт. Либо магазин временно "
+                         "придушил после серии попыток — тогда подожди 20-30 минут. "
+                         "Приложения, купленные этим аккаунтом, возвращаются нормально."),
 )
 
 
@@ -4885,20 +4891,29 @@ def ensure_fixed_ipatool() -> Path | None:
                 return dst
         except Exception:
             pass
-    try:
-        packed = _fetch(UPDATE_BASE + name + ".gz", timeout=300)
-        data = gzip.decompress(packed)
-        if hashlib.sha256(data).hexdigest() != want:
-            remember_error("докачка рабочего ipatool", "отпечаток файла не совпал")
-            return None
-        USER_BIN_DIR.mkdir(parents=True, exist_ok=True)
-        dst.write_bytes(data)
-        if not IS_WINDOWS:
-            os.chmod(dst, 0o755)
-        return dst
-    except Exception as e:
-        remember_error("докачка рабочего ipatool", str(e)[:150])
-        return None
+    # Качаем по цепочке источников. Зеркало на своём VPS — ПЕРВЫМ: в РФ оно
+    # быстрее GitHub, и GitHub при веб-заливке иногда ОБРЕЗАЕТ большой .gz
+    # (файл скачивается, но не распаковывается — так «слетал» вход на винде).
+    # GitHub остаётся запасным на случай, если VPS недоступен.
+    sources = [GUARD_URL + "/bin/" + name + ".gz", UPDATE_BASE + name + ".gz"]
+    last_err = ""
+    for url in sources:
+        try:
+            packed = _fetch(url, timeout=300)
+            data = gzip.decompress(packed)          # битый/обрезанный .gz упадёт здесь
+            if hashlib.sha256(data).hexdigest() != want:
+                last_err = "отпечаток не совпал (" + url.split("//", 1)[-1][:40] + ")"
+                continue
+            USER_BIN_DIR.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(data)
+            if not IS_WINDOWS:
+                os.chmod(dst, 0o755)
+            return dst
+        except Exception as e:
+            last_err = str(e)[:120]
+            continue
+    remember_error("докачка рабочего ipatool", last_err or "не удалось ни с зеркала, ни с GitHub")
+    return None
 
 
 _recent_errors: list = []

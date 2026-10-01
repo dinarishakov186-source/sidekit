@@ -1,8 +1,8 @@
 {
-  "version": "2026-09-09.129-vps-mirror",
-  "notes": "рабочий ipatool качается с зеркала на VPS (первым), GitHub запасным — чинит вход на винде, когда GitHub обрезал/тормозит .gz",
+  "version": "2026-10-01.130-ipatool-2.6.0",
+  "notes": "официальный ipatool 2.6.0 (кросс-платформенный фикс входа Apple GSA/SAP, Windows тоже); старый bmrng-билд умер. Бинарники берутся с VPS-зеркала.",
   "sha256": {
-    "server.py": "b505ec3bcbdf8efc7034b8d64337516bd7694371005255c07a8903efea6ba17f",
+    "server.py": "51b38fe7971dc7b03211c8e5d90431c01cb926f79a5f1e3d6072ecc9fb08ad46",
     "index.html": "b6d7be23b597f5e20557b67db7c5cd42ac18feec12ea5903a97e3ca829c69d0b"
   }
 }

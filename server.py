@@ -114,7 +114,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-09-09.129-vps-mirror"
+SERVER_VERSION = "2026-10-01.130-ipatool-2.6.0"
 
 
 # ---------------------------------------------------------------------------
@@ -4831,19 +4831,25 @@ def ensure_legacy_ipatool() -> Path | None:
 # Отпечатки РАСПАКОВАННЫХ бинарников (рабочий ipatool bmrng, main-d5d0b56, с
 # ActionSignature). На сервере лежат сжатыми (.gz), чтобы влезть в веб-загрузку
 # GitHub (< 25 МБ); движок распакует и сверит отпечаток именно распакованного.
+# Официальный ipatool 2.6.0 (majd, 13.09.2026) — кросс-платформенный фикс входа
+# под новый GSA/SAP Apple (осень 2026). Старый bmrng-билд (main-d5d0b56) с
+# октября 2026 перестал входить (Apple снова сменила ответ), а bmrng ушёл в
+# Mac-only (CommerceKit). Официальный 2.6.0 работает и на Windows. Отпечатки —
+# РАСПАКОВАННЫХ бинарников из релиза, сверены с официальными .sha256sum.
 FIXED_IPATOOL_SHA = {
-    "ipatool-fixed-mac-arm64": "8510aaf50d0e5f90ccf0b55c87242edae6f203f141615266006e86b433e6028f",
-    "ipatool-fixed-mac-amd64": "011072b2f540fd60d2fcd8bd1ff9c41c2616275d30a0024fdf740e48b6d96da4",
-    "ipatool-fixed.exe":       "8ea32800b1240ace81c3e573c76f35c63437e3aa89c6f5926aa1ceda69877374",
+    "ipatool-fixed-mac-arm64": "de716798848eefecce3ce68e80183a68518a9dd24fe9f4ca615e5fd7a5a57565",
+    "ipatool-fixed-mac-amd64": "8d7c9948406a7898b49761bf7e17475bfe1def766ec008b4eaf70fcccb594b9e",
+    "ipatool-fixed.exe":       "79993976658be95f1c0a7d30e2bdc806b4764dca0619815bfc6c96630f1103ec",
 }
 
-# Все заведомо рабочие бинарники ipatool (с заголовком ActionSignature, который
-# пробивает вход осенью 2026). Движок доверяет вшитому в комплект файлу ТОЛЬКО
-# если его отпечаток здесь: иначе старый Windows-установщик, куда попала
-# сломанная сборка, заставлял брать её и никогда не качать рабочую.
+# Заведомо рабочие отпечатки. Движок доверяет вшитому файлу ТОЛЬКО если его
+# отпечаток здесь — иначе старый/сломанный bmrng остался бы и не докачался
+# официальный. На Маке лаунчер ad-hoc переподписывает вшитый bin/* при каждом
+# запуске (идемпотентно), из-за чего у Mac-бинарника ДВА валидных отпечатка:
+# чистый (как качается с зеркала) и переподписанный (как лежит после запуска).
 _KNOWN_GOOD_FIXED = set(FIXED_IPATOOL_SHA.values()) | {
-    # bmrng 0.1.2 (2.3.2-sapfix.1), вшит в Mac-сборку у Динара — проверенно рабочий
-    "12f68bc6eea9f7ca2eaca9ea02f18ff2fd89b6a5c08dae4f617837b5afbf8ee5",
+    "6747c741e730467982f6d1a2c8968e4dc9025596871edd3f2f8b61bebe82e939",  # mac-arm64 после переподписи
+    "6848ecef9cd5425d7bd67f97faf47be41ec298fb3b9b87ae18e35055b71603c8",  # mac-amd64 после переподписи
 }
 _good_fixed_cache: dict = {}
 

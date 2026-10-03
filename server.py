@@ -114,7 +114,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-10-01.130-ipatool-2.6.0"
+SERVER_VERSION = "2026-10-03.131-login-async"
 
 
 # ---------------------------------------------------------------------------
@@ -1258,11 +1258,13 @@ def ipatool_login(email: str, password: str, auth_code: str | None, force: bool 
         return line
 
     cmd = build_cmd(tool)
-    # A longer timeout here on purpose: on the first ever run, macOS pops a
-    # "ipatool wants to access your keychain" permission dialog while this
-    # is running, and the command genuinely blocks until the user answers
-    # it. 60s isn't unreasonable for "go find that dialog and click it".
-    rc, out, err = run(cmd, timeout=90)
+    # Длинный таймаут осознанно: ipatool 2.6.0 на ПЕРВОМ входе сам предупреждает
+    # «preparing authentication; the first login may take a few minutes» — новый
+    # SAP/GSA-вход Apple реально молотит минуты. Плюс на Маке в это время может
+    # висеть диалог Связки ключей. Прежние 90с убивали ipatool на полпути →
+    # вход «не получался» на ровном месте. Вход идёт фоновым заданием, так что
+    # долгое ожидание окну уже не мешает.
+    rc, out, err = run(cmd, timeout=300)
 
     # Apple иногда отвечает 404 на самом последнем шаге - когда отправляешь
     # код. Свежий ipatool сам выбирает, на какой сервер Apple идти, и порой
@@ -1291,7 +1293,7 @@ def ipatool_login(email: str, password: str, auth_code: str | None, force: bool 
     if looks_like_apple_block((out or "") + (err or "")):
         remember_error("вход в Apple ID", "Apple отказала: " + ((err or out) or "")[:200])
         time.sleep(1.5)
-        rc, out, err = run(build_cmd(tool), timeout=90)   # бывает разовым
+        rc, out, err = run(build_cmd(tool), timeout=300)  # бывает разовым
     if looks_like_apple_block((out or "") + (err or "")):
         spare = ensure_legacy_ipatool()                   # при нужде докачает
         if spare and str(spare) != tool:
@@ -1413,6 +1415,41 @@ def ipatool_login(email: str, password: str, auth_code: str | None, force: bool 
         )
     return {"ok": False, "error": human, "raw": combined,
             "at_code_step": bool(auth_code)}
+
+
+# Вход идёт ФОНОВЫМ заданием, а окно опрашивает /api/login-progress. Иначе
+# долгий первый вход SAP (ipatool: «may take a few minutes») упирался в таймаут
+# самого окна — оно обрывало запрос (ConnectionAborted в журнале), и вход
+# выглядел сломанным, хотя движок ещё молотил. Теперь запрос возвращается сразу.
+_login_lock = threading.Lock()
+_login_job = {"running": False, "done": False, "result": None, "id": 0}
+
+
+def start_login(email: str, password: str, auth_code: str | None, force: bool) -> dict:
+    with _login_lock:
+        _login_job["id"] += 1
+        jid = _login_job["id"]
+        _login_job.update({"running": True, "done": False, "result": None})
+
+    def work():
+        try:
+            r = ipatool_login(email, password, auth_code, force)
+        except Exception as e:
+            remember_error("вход в Apple ID", str(e)[:300])
+            r = {"ok": False, "error": "Сбой при входе: " + str(e)[:200]}
+        with _login_lock:
+            if _login_job["id"] == jid:          # нас не вытеснил новый вход
+                _login_job.update({"running": False, "done": True, "result": r})
+
+    threading.Thread(target=work, daemon=True).start()
+    return {"ok": True, "started": True}
+
+
+def login_progress() -> dict:
+    with _login_lock:
+        if _login_job["done"]:
+            return {"ok": True, "done": True, "result": _login_job["result"]}
+        return {"ok": True, "done": False, "running": _login_job["running"]}
 
 
 def ipatool_search(term: str, limit: int) -> dict:
@@ -4009,6 +4046,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(get_download_progress())
             elif path == "/api/install-progress":
                 self._send_json(get_install_progress())
+            elif path == "/api/login-progress":
+                self._send_json(login_progress())
             else:
                 self._send_json({"error": "not found"}, status=404)
         except Exception as e:
@@ -4032,8 +4071,8 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/logout":
                 self._send_json(ipatool_logout())
             elif path == "/api/login":
-                self._send_json(ipatool_login(body.get("email", ""), body.get("password", ""),
-                                             body.get("auth_code"), bool(body.get("force"))))
+                self._send_json(start_login(body.get("email", ""), body.get("password", ""),
+                                            body.get("auth_code"), bool(body.get("force"))))
             elif path == "/api/download":
                 dest = body.get("dest_path")
                 want_desktop = False

@@ -1078,7 +1078,16 @@ async function doLogin(force = false) {
   if (code) showMsg(msg, "Проверяю код…", "info");
 
   try {
-    const result = await api("POST", "/api/login", { email, password, auth_code: code || null, force });
+    // Вход идёт фоном: первый вход SAP может молотить пару минут, и окно не
+    // должно обрывать запрос. Запускаем и опрашиваем, пока не завершится.
+    await api("POST", "/api/login", { email, password, auth_code: code || null, force });
+    if (!code) showMsg(msg, "Вхожу в Apple ID… первый вход может занять пару минут.", "info");
+    let result;
+    while (true) {
+      await new Promise(r => setTimeout(r, 1500));
+      const p = await api("GET", "/api/login-progress");
+      if (p && p.done) { result = p.result || { ok:false, error:"пустой ответ входа" }; break; }
+    }
     loggedIn = !!result.ok;
     if (loggedIn) {
       msg.style.display = "none";

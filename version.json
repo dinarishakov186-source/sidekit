@@ -1,8 +1,8 @@
 {
-  "version": "2026-10-03.131-login-async",
-  "notes": "вход идёт фоном (окно не обрывает долгий первый вход SAP) + таймаут ipatool 90→300с; ipatool 2.6.0. Сетевые таймауты к Apple — это провайдер/антивирус, лечится VPN.",
+  "version": "2026-10-12.132-ipatool-2.7.0",
+  "notes": "ipatool 2.7.0 — Apple 12.10 снова сменила вход (HTTP 302 без Location), 2.7.0 чинит. Бинарники с VPS-зеркала.",
   "sha256": {
-    "server.py": "495d52ccbc9d141bb514dd1904e5d929f936c372df7640a71c24c271eb280789",
+    "server.py": "94beb63058ff36a09a362799f4324ba51f1d07e6a3eb61b2d1a22daf3e0e7342",
     "index.html": "2e34b0a3e281a0b3b4fa09c77676358cd9778c433b1435c2fa58e95aedcc5c8b"
   }
 }

@@ -114,7 +114,7 @@ LOCK_FILE = LOCK_DIR / "server.lock"
 # forever. Closing the browser tab does NOT stop the Python process behind
 # it, so without this check a months-old process could quietly keep
 # serving every future double-click of a newly downloaded SideKit.app.
-SERVER_VERSION = "2026-10-03.131-login-async"
+SERVER_VERSION = "2026-10-12.132-ipatool-2.7.0"
 
 
 # ---------------------------------------------------------------------------
@@ -4875,21 +4875,21 @@ def ensure_legacy_ipatool() -> Path | None:
 # октября 2026 перестал входить (Apple снова сменила ответ), а bmrng ушёл в
 # Mac-only (CommerceKit). Официальный 2.6.0 работает и на Windows. Отпечатки —
 # РАСПАКОВАННЫХ бинарников из релиза, сверены с официальными .sha256sum.
+# Официальный ipatool 2.7.0 (majd, 09.10.2026). Apple 12.10 снова сменила вход:
+# auth-эндпоинт стал отдавать HTTP 302 без Location — 2.6.0 это не разбирал
+# («no usable authentication response»). 2.7.0 чинит. Отпечатки РАСПАКОВАННЫХ
+# бинарников, сверены с официальными .sha256sum.
 FIXED_IPATOOL_SHA = {
-    "ipatool-fixed-mac-arm64": "de716798848eefecce3ce68e80183a68518a9dd24fe9f4ca615e5fd7a5a57565",
-    "ipatool-fixed-mac-amd64": "8d7c9948406a7898b49761bf7e17475bfe1def766ec008b4eaf70fcccb594b9e",
-    "ipatool-fixed.exe":       "79993976658be95f1c0a7d30e2bdc806b4764dca0619815bfc6c96630f1103ec",
+    "ipatool-fixed-mac-arm64": "ba0f7992016c06a24501dfdd6bd55505ef179af15a4d17fc049f1d577c702fc7",
+    "ipatool-fixed-mac-amd64": "f37f1eb183214e36252f5f366845642e9eeca48b904ec0fa3e75f633e4816050",
+    "ipatool-fixed.exe":       "7b83589b74ad533f5d5dbab0ca87a5cb76b123bcbeb2553d57e9c154e35d8755",
 }
 
 # Заведомо рабочие отпечатки. Движок доверяет вшитому файлу ТОЛЬКО если его
-# отпечаток здесь — иначе старый/сломанный bmrng остался бы и не докачался
-# официальный. На Маке лаунчер ad-hoc переподписывает вшитый bin/* при каждом
-# запуске (идемпотентно), из-за чего у Mac-бинарника ДВА валидных отпечатка:
-# чистый (как качается с зеркала) и переподписанный (как лежит после запуска).
-_KNOWN_GOOD_FIXED = set(FIXED_IPATOOL_SHA.values()) | {
-    "6747c741e730467982f6d1a2c8968e4dc9025596871edd3f2f8b61bebe82e939",  # mac-arm64 после переподписи
-    "6848ecef9cd5425d7bd67f97faf47be41ec298fb3b9b87ae18e35055b71603c8",  # mac-amd64 после переподписи
-}
+# отпечаток здесь. Переподписанных хешей больше нет: лаунчер теперь НЕ трогает
+# уже подписанный бинарник (а официальный ipatool подписан линкером), так что
+# отпечаток остаётся чистым и совпадает с тем, что качается с зеркала.
+_KNOWN_GOOD_FIXED = set(FIXED_IPATOOL_SHA.values())
 _good_fixed_cache: dict = {}
 
 
